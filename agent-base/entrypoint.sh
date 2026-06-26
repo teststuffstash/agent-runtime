@@ -6,10 +6,20 @@
 # watched live. Interactive and non-interactive runs prep identically; only the exec'd CMD differs.
 set -euo pipefail
 
-: "${REPO_URL:?set REPO_URL (https with the proxy-injected git token, or ssh)}"
+: "${REPO_URL:?set REPO_URL (https; GH_TOKEN enables private clone+push)}"
 BASE_REF="${BASE_REF:-master}"
 WORK_BRANCH="${WORK_BRANCH:-agent/$(date -u +%Y%m%d-%H%M%S)}"
 WORKDIR="${WORKDIR:-/work/repo}"
+
+# Git auth: if a scoped token is present (minted by the ESO GithubAccessToken generator → GH_TOKEN),
+# use it for github.com over HTTPS so the agent can clone PRIVATE repos and push its branch. `gh`
+# picks up GH_TOKEN automatically for `gh pr create`. (v2 / ADR-081: injected by the egress proxy,
+# never held in the pod.) HOME is writable here (unlike the jail), so a global credential helper is fine.
+if [ -n "${GH_TOKEN:-}" ]; then
+  git config --global credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
+  git config --global user.name  "${GIT_AUTHOR_NAME:-homelab-agent}"
+  git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@teststuff.net}"
+fi
 
 if [ ! -d "$WORKDIR/.git" ]; then
   echo "→ cloning $REPO_URL @ $BASE_REF"

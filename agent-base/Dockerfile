@@ -30,8 +30,13 @@ ENV PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH
 USER root
 COPY agent-base/entrypoint.sh /usr/local/bin/agent-entrypoint
 RUN chmod +x /usr/local/bin/agent-entrypoint
+# Login shells (bash -l) re-read /etc/profile and would drop the harness bin from PATH; re-add it so
+# interactive sessions and recipes find goose/opencode regardless of shell type.
+RUN printf 'export PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH\n' > /etc/profile.d/agent-path.sh
 
-USER devbox
+# Run as a NUMERIC non-root uid so Kubernetes `runAsNonRoot` can verify it without a per-pod
+# runAsUser (the 'devbox' user is uid 1000 in the base image).
+USER 1000:1000
 WORKDIR /work
 # entrypoint preps the repo (clone + branch + project `devbox install`), then exec's CMD:
 # a recipe for headless, or `bash -l` for interactive. Override CMD per launch.
