@@ -1,0 +1,7 @@
+# Devbox per-project env (regenerated from devbox.json/devbox.lock; not committed).
+# devbox.lock IS committed — it's the deterministic version pin.
+.devbox/
+.venv/
+
+# SBOM/build artifacts
+sbom.spdx.json

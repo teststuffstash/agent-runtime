@@ -1,0 +1,41 @@
+# Build + push the agent-base harness image to ghcr on every master push. Single responsibility:
+# this repo produces one artifact family, so there are no path filters or "is this a deploy?" rules
+# — every push to master builds. The tag is content-addressed by agent-base/devbox.lock (same lock →
+# same toolchain → same tag), so a rebuild is reproducible and Renovate's lock bump is the trigger.
+#
+# amd64-only (the agents run in-cluster on x86). Self-hosted ARC runner (homelab-ephemeral); ghcr
+# push auth is the job's GITHUB_TOKEN (packages: write) — no extra secret. Mirrors the sleep-tracking
+# build-image.yaml so the pattern is identical across Tier-A repos.
+name: build-image
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  image:
+    runs-on: homelab-ephemeral
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute reproducible tag from the lock
+        id: ver
+        run: echo "tag=$(date -u +%Y-%m-%d)-$(sha256sum agent-base/devbox.lock | cut -c1-8)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent-base/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/agent-base:${{ steps.ver.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/agent-base:latest

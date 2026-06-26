@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+# agent-base — the homelab agent platform's harness image (ADR-077/078, docs/agents/).
+#
+# Bundles the *harnesses* (goose + opencode) on a devbox/nix base. The per-project toolchain
+# (python/uv/pytest/…) is NOT baked here — it is materialized at runtime from the cloned repo's
+# own devbox.json (boot-from-git), so this image stays project-agnostic and lean.
+#
+# One image, two launch modes (see agents/agent-session.sh):
+#   • non-interactive — the coordinator runs a recipe headless           → branch + PR
+#   • interactive     — you `exec` a shell and drive goose/opencode by hand → branch + PR
+# Same scope/secrets/lifecycle either way; only the command differs.
+#
+# Base = the upstream devbox image (nix + devbox preinstalled, real Debian userland so `exec`
+# gives a shell). Floating tag for now; pin to a digest via Renovate once this lands (same
+# convention as sleep-tracking/Dockerfile).
+FROM jetpackio/devbox:latest
+
+USER root
+RUN mkdir -p /opt/agent /work && chown -R devbox:devbox /opt/agent /work
+
+# Materialize the harness layer from the committed lock → deterministic goose/opencode versions.
+WORKDIR /opt/agent
+COPY --chown=devbox:devbox agent-base/devbox.json agent-base/devbox.lock ./
+USER devbox
+RUN devbox install
+
+# Put the harness profile on PATH for every shell/exec (interactive + headless).
+ENV PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH
+
+USER root
+COPY agent-base/entrypoint.sh /usr/local/bin/agent-entrypoint
+RUN chmod +x /usr/local/bin/agent-entrypoint
+
+USER devbox
+WORKDIR /work
+# entrypoint preps the repo (clone + branch + project `devbox install`), then exec's CMD:
+# a recipe for headless, or `bash -l` for interactive. Override CMD per launch.
+ENTRYPOINT ["/usr/local/bin/agent-entrypoint"]
+CMD ["bash", "-l"]

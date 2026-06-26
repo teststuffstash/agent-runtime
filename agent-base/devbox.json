@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "goose-cli@latest",
+    "opencode@latest",
+    "gh@latest",
+    "git@latest",
+    "ripgrep@latest",
+    "jq@latest"
+  ],
+  "shell": {
+    "init_hook": [],
+    "scripts": {}
+  }
+}
