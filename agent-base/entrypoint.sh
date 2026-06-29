@@ -28,6 +28,17 @@ fi
 cd "$WORKDIR"
 git checkout -B "$WORK_BRANCH"
 
+# Provenance, not config: record WHICH harness + model produced each commit. The model is a call-time
+# arg (agent-session --model → GOOSE_MODEL), deliberately NOT pinned in the repo, so history is where
+# you find out what wrote a change. A prepare-commit-msg hook stamps it on every commit — including
+# `git commit -m`, so it doesn't depend on the agent remembering to add a trailer.
+cat > .git/hooks/prepare-commit-msg <<HOOK
+#!/bin/sh
+grep -q '^Agent-Model:' "\$1" 2>/dev/null && exit 0
+printf '\nAgent-Harness: %s\nAgent-Model: %s\n' "${HARNESS:-goose}" "${GOOSE_MODEL:-${MODEL:-unknown}}" >> "\$1"
+HOOK
+chmod +x .git/hooks/prepare-commit-msg
+
 # Materialize the PROJECT toolchain from its own devbox.json (cold from the nix cache the first
 # time; near-instant once a shared store / attic cache is in place — see agents/README.md).
 if [ -f devbox.json ]; then
