@@ -33,7 +33,8 @@ ENV PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH
 
 USER root
 COPY agent-base/entrypoint.sh /usr/local/bin/agent-entrypoint
-RUN chmod +x /usr/local/bin/agent-entrypoint
+COPY agent-base/agent-finalize /usr/local/bin/agent-finalize
+RUN chmod +x /usr/local/bin/agent-entrypoint /usr/local/bin/agent-finalize
 # Login shells (bash -l) re-read /etc/profile and would drop the harness bin from PATH; re-add it so
 # interactive sessions and recipes find goose/opencode regardless of shell type.
 RUN printf 'export PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH\n' > /etc/profile.d/agent-path.sh

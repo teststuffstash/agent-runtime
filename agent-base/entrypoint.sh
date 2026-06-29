@@ -58,4 +58,9 @@ if [ -f devbox.json ]; then
 fi
 
 echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)"
+
+# Baseline for the end-of-run stats (agent-finalize): session start time + OpenRouter usage now, so the
+# post-run delta = this run's cost/duration. Best-effort; never blocks the run.
+agent-finalize --snapshot || true
+
 exec "$@"
