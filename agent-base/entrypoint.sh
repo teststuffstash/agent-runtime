@@ -39,8 +39,19 @@ printf '\nAgent-Harness: %s\nAgent-Model: %s\n' "${HARNESS:-goose}" "${GOOSE_MOD
 HOOK
 chmod +x .git/hooks/prepare-commit-msg
 
-# Materialize the PROJECT toolchain from its own devbox.json (cold from the nix cache the first
-# time; near-instant once a shared store / attic cache is in place — see agents/README.md).
+# Nix pull-through cache (homelab argocd/resources/nix-cache): prefer the in-cluster mirror of
+# cache.nixos.org so the project closure is fetched over the WAN once, then served LAN-speed on every
+# later run. Bodies pass through unchanged, so upstream signatures stay valid — no extra trusted key.
+# An unreachable cache degrades gracefully (nix falls back to the upstream substituter). Override with
+# NIX_CACHE_URL, or set it empty to disable.
+NIX_CACHE_URL="${NIX_CACHE_URL:-http://nixcache.nix-cache.svc.cluster.local}"
+if [ -n "$NIX_CACHE_URL" ]; then
+  export NIX_CONFIG="extra-substituters = ${NIX_CACHE_URL}?priority=10
+extra-trusted-substituters = ${NIX_CACHE_URL}"
+fi
+
+# Materialize the PROJECT toolchain from its own devbox.json. Cold the very first time across all
+# pods (populates the cache above); near-instant for the same closure afterwards.
 if [ -f devbox.json ]; then
   echo "→ devbox install (project toolchain)"
   devbox install
