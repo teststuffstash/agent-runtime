@@ -6,7 +6,11 @@
     "gh@latest",
     "git@latest",
     "ripgrep@latest",
-    "jq@latest"
+    "jq@latest",
+    "gitleaks@latest",
+    "kubectl@latest",
+    "python@3.11",
+    "uv@latest"
   ],
   "shell": {
     "init_hook": [],

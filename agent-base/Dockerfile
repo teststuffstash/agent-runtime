@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1
 # agent-base — the homelab agent platform's harness image (ADR-077/078, docs/agents/).
 #
-# Bundles the *harnesses* (goose + opencode) on a devbox/nix base. The per-project toolchain
-# (python/uv/pytest/…) is NOT baked here — it is materialized at runtime from the cloned repo's
-# own devbox.json (boot-from-git), so this image stays project-agnostic and lean.
+# Bundles the *harnesses* (goose + opencode) plus the *common* project toolchain that recurs across
+# the agent-target repos (python/uv/kubectl/gitleaks) on a devbox/nix base. The cloned repo's own
+# devbox.json stays AUTHORITATIVE and still runs at startup (boot-from-git) — baking here is purely a
+# /nix-store cache-warm: it realises the shared closure at build time so the runtime `devbox install`
+# only has to fetch the project-specific delta (k3d/helm/ansible/… stay out of this image). Versions
+# track the projects' specifiers so the store paths line up; on drift the worst case is a runtime
+# re-fetch, never a wrong toolchain.
 #
 # One image, two launch modes (see agents/agent-session.sh):
 #   • non-interactive — the coordinator runs a recipe headless           → branch + PR
