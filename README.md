@@ -16,7 +16,8 @@ builds**. Same Tier-A pattern as the app repos (sleep-tracking, snore-recorder) 
 ## `agent-base`
 
 `FROM jetpackio/devbox` + the **harnesses** pinned via devbox/nix: **goose-cli + opencode** (plus
-gh, git, ripgrep, jq). It deliberately bakes **no project toolchain** — the per-project
+the basic shell tools agents reach for so they don't fall back to writing Python: gh, git, ripgrep,
+curl, wget, jq). It deliberately bakes **no project toolchain** — the per-project
 python/uv/pytest/… is materialized at runtime from the cloned repo's own `devbox.json`
 (boot-from-git), so the image stays lean and project-agnostic. One image, two launch modes (the
 launcher lives in homelab as `agents/agent-session.sh`):

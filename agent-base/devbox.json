@@ -6,6 +6,8 @@
     "gh@latest",
     "git@latest",
     "ripgrep@latest",
+    "curl@latest",
+    "wget@latest",
     "jq@latest",
     "gitleaks@latest",
     "kubectl@latest",
