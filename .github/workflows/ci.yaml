@@ -1,0 +1,28 @@
+# ci.yaml — PR gate: the agent-base image must still BUILD. A dep/lock bump that breaks the build is
+# caught HERE, on the PR, instead of on the master push that ships it. This is the required status check
+# `ci` that gates the merge path (renovate auto-merge + update-pr-branch, FU-014/FU-041) — without a
+# PR-triggered check, an armed PR could never see green and the updater would never bring it current.
+#
+# No push: build-image.yaml owns the ghcr push on master; this is a no-push verification build on the
+# same ARC tier (homelab-ephemeral), so it exercises the real Dockerfile + devbox/nix toolchain resolve.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: homelab-ephemeral
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build agent-base image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: agent-base/Dockerfile
+          platforms: linux/amd64
+          push: false
