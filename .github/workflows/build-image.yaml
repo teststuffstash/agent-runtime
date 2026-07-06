@@ -11,6 +11,9 @@ name: build-image
 on:
   push:
     branches: [master]
+    paths: # only rebuild when the image content can actually change (not on doc-only commits)
+      - "agent-base/**"
+      - ".github/workflows/build-image.yaml"
   workflow_dispatch:
 
 jobs:
@@ -27,9 +30,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Compute reproducible tag from the lock
+      # Version = commit-date CalVer + short git sha (2026.<m>.<d>-g<sha>) — consistent with the
+      # openrouter-operator / sleep-ingester deploy versioning. Traceable (tag → commit); the path
+      # filter above keeps it from churning on changes that don't affect the image.
+      - name: Compute version
         id: ver
-        run: echo "tag=$(date -u +%Y-%m-%d)-$(sha256sum agent-base/devbox.lock | cut -c1-8)" >> "$GITHUB_OUTPUT"
+        run: |
+          SHA=$(git rev-parse --short=12 HEAD)
+          DATE=$(git show -s --format=%cd --date=format:'%Y.%-m.%-d' HEAD)
+          echo "tag=${DATE}-g${SHA}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
