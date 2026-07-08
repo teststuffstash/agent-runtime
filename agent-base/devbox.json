@@ -10,6 +10,7 @@
     "wget@latest",
     "jq@latest",
     "gitleaks@latest",
+    "s5cmd@latest",
     "kubectl@latest",
     "python@3.11",
     "uv@latest"

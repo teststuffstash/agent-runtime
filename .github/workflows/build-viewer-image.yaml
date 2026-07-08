@@ -1,0 +1,38 @@
+# Build + push the transcripts-viewer image (homelab docs/agents/observability-and-retro.md §A2).
+# Upstream https://github.com/jhlee0409/claude-code-history-viewer ships a Dockerfile (server mode,
+# `cchv-server --serve`, port 3727) but NO published image and no npm package — so we build it from
+# the upstream repo at a PINNED tag and push it to our ghcr as ghcr.io/<org>/cchv-server:<tag>.
+# Manual trigger only: this is a third-party image we rebuild on deliberate version bumps, not on
+# our own pushes. Consumed by homelab agents/coordinator/transcripts-viewer.yaml (pinned there too).
+name: build-viewer-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream release tag to build (also becomes our image tag)"
+        required: true
+        default: "v1.18.0"
+
+jobs:
+  image:
+    runs-on: homelab-ephemeral
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Build straight from the upstream git context at the pinned tag — no checkout of this repo
+      # needed; the ref in the context URL is the version pin.
+      - uses: docker/build-push-action@v6
+        with:
+          context: "https://github.com/jhlee0409/claude-code-history-viewer.git#${{ inputs.upstream_tag }}"
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/cchv-server:${{ inputs.upstream_tag }}
