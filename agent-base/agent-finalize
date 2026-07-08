@@ -62,6 +62,86 @@ def parse_outcome(log_path):
     return found
 
 
+def upload_transcripts(stats, log_path):
+    """Persist the run's exhaust to the agent-transcripts bucket (homelab
+    docs/agents/observability-and-retro.md §A1): manifest.json + run.log + the goose session dir →
+    s3://<bucket>/<project>/<task>/worker-r<round>-<ts>/. The launcher (agents/agent-session.sh)
+    injects the WRITE-ONLY key + task/round as env. Loud on failure, but NEVER fails the run —
+    and it runs AFTER the AGENT_RUN_STATS line, so a hung/failed upload can't cost us the stats.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    key_id = os.environ.get("AGENT_TS_ACCESS_KEY_ID")
+    if not key_id:
+        print("transcripts: no S3 key (AGENT_TS_* env absent) — upload skipped", file=sys.stderr)
+        return
+    s5 = shutil.which("s5cmd")
+    if not s5:
+        print("transcripts: s5cmd not in image — upload skipped", file=sys.stderr)
+        return
+
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    task = os.environ.get("AGENT_TASK") or "adhoc"
+    rnd = os.environ.get("AGENT_ROUND") or "1"
+    bucket = os.environ.get("AGENT_TS_BUCKET", "agent-transcripts")
+    endpoint = os.environ.get("AGENT_TS_ENDPOINT", "http://garage.garage.svc.cluster.local:3900")
+    prefix = "s3://%s/%s/%s/worker-r%s-%s" % (bucket, stats.get("project") or "unknown", task, rnd, ts)
+    env = dict(
+        os.environ,
+        AWS_ACCESS_KEY_ID=key_id,
+        AWS_SECRET_ACCESS_KEY=os.environ.get("AGENT_TS_SECRET_ACCESS_KEY", ""),
+        AWS_REGION="garage",
+    )
+
+    def put(src, dst):
+        try:
+            subprocess.run(
+                [s5, "--endpoint-url", endpoint, "cp", src, dst],
+                env=env, check=True, timeout=120,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            return True
+        except Exception as e:
+            print("transcripts: upload FAILED for %s: %s (non-fatal)" % (src, e), file=sys.stderr)
+            return False
+
+    files = []
+    if log_path and os.path.exists(log_path) and put(log_path, prefix + "/run.log"):
+        files.append("run.log")
+    # goose's native session files (the pod is fresh per run, so everything there is this run's).
+    # opencode keeps no equivalent local transcript — run.log is its record.
+    sdir = os.path.expanduser("~/.local/share/goose/sessions")
+    for root, _, names in os.walk(sdir):
+        for n in names:
+            p = os.path.join(root, n)
+            rel = os.path.relpath(p, sdir)
+            if put(p, "%s/goose-sessions/%s" % (prefix, rel)):
+                files.append("goose-sessions/" + rel)
+
+    manifest = {
+        "role": "worker",
+        "project": stats.get("project", ""),
+        "task": task,
+        "round": int(rnd) if rnd.isdigit() else rnd,
+        "model": stats.get("model", ""),
+        "harness": stats.get("harness", ""),
+        "session_key": os.environ.get("AGENT_SESSION_KEY", ""),
+        "stats": stats,
+        "exit_status": os.environ.get("HARNESS_EXIT", ""),
+        "pr_url": stats.get("pr_url", ""),
+        "pod": stats.get("pod", ""),
+        "grafana_query": '{pod="%s"}' % stats.get("pod", ""),
+        "files": files,
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(manifest, f, indent=1)
+        mpath = f.name
+    put(mpath, prefix + "/manifest.json")
+    print("transcripts: uploaded → " + prefix, flush=True)
+
+
 def finalize(log_path):
     time.sleep(6)  # let OpenRouter usage accounting settle for the last request(s)
     stats = {
@@ -75,6 +155,10 @@ def finalize(log_path):
     }
     stats.update(parse_outcome(log_path) if log_path else {})
     print("AGENT_RUN_STATS " + json.dumps(stats, separators=(",", ":")), flush=True)
+    try:  # §A1 capture — deliberately after the stats line
+        upload_transcripts(stats, log_path)
+    except Exception as e:
+        print("transcripts: non-fatal error: %s" % e, file=sys.stderr)
 
 
 if __name__ == "__main__":
