@@ -22,6 +22,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -48,3 +50,46 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/agent-base:${{ steps.ver.outputs.tag }}
             ghcr.io/${{ github.repository_owner }}/agent-base:latest
+
+  # deploy-pin: bump homelab agents/images.env to the just-built version → agent pods use the pinned
+  # image (off :latest) on next spawn. First-party bump (CI-opened, not Renovate). ubuntu-latest for
+  # a pre-installed gh + git; skips gracefully until DEPLOY_APP_* is wired.
+  deploy-pin:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - name: DEPLOY_APP present?
+        id: gate
+        run: |
+          if [ -n "${{ secrets.DEPLOY_APP_ID }}" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else
+            echo "::warning::DEPLOY_APP_ID unset — skipping images.env bump (run 'devbox run github-tofu apply' + install homelab-deploy on homelab)"
+            echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/create-github-app-token@v1
+        if: steps.gate.outputs.ok == 'true'
+        id: hl
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homelab
+      - name: Open/arm the homelab images.env bump PR
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ steps.hl.outputs.token }}
+          TAG: ${{ needs.image.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VAR=AGENT_BASE_IMAGE; NEWREF="ghcr.io/${{ github.repository_owner }}/agent-base:${TAG}"
+          git clone --quiet --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/homelab.git" h && cd h
+          cur=$(grep -m1 "^${VAR}=" agents/images.env | cut -d= -f2-)
+          [ "$cur" = "$NEWREF" ] && { echo "images.env already ${VAR}=${NEWREF}"; exit 0; }
+          git config user.name "homelab-deploy[bot]"; git config user.email "homelab-deploy[bot]@users.noreply.github.com"
+          git checkout -q -B deploy/agent-base
+          sed -i -E "s#^(${VAR}=).*#\1${NEWREF}#" agents/images.env
+          git commit -q -am "deploy: agent-base ${TAG}"
+          git push -q -f origin deploy/agent-base
+          PR=$(gh pr list --repo "${{ github.repository_owner }}/homelab" --head deploy/agent-base --state open --json number --jq '.[0].number // empty')
+          [ -n "$PR" ] || PR=$(gh pr create --repo "${{ github.repository_owner }}/homelab" --base master --head deploy/agent-base \
+            --title "deploy: agent-base ${TAG}" --body "First-party agent-base image bump (CI-opened, not Renovate). Agent worker pods pick it up on next spawn." | grep -oE '[0-9]+$')
+          gh pr merge "$PR" --repo "${{ github.repository_owner }}/homelab" --auto --squash || echo "::warning::could not arm auto-merge on homelab#$PR"
+          echo "→ homelab images.env PR #$PR → ${TAG}"
