@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
-"""End-of-session stats for an agent run (homelab agent platform).
+"""End-of-session stats + terminal bookkeeping for an agent run (homelab agent platform).
 
 Two modes:
   agent-finalize --snapshot   # at entrypoint: record start time + OpenRouter usage baseline
-  agent-finalize <run_log>    # after the harness: emit ONE `AGENT_RUN_STATS {json}` line to stdout
+  agent-finalize <run_log>    # after the harness: salvage-push, emit `AGENT_RUN_STATS {json}`,
+                              # arm/comment/strike on GitHub, push metrics, upload transcripts
 
 Cost is computed HERE because the pod (not the launcher) holds the OpenRouter key — usage delta over
-the run = this run's $. The launcher (agents/agent-session.sh) reads the emitted line and posts the PR
-comment, so the GitHub write stays out of the pod (no issues:write needed on the scoped agent token).
-Everything is best-effort: a stats failure must never fail the run.
+the run = this run's $. GitHub bookkeeping (auto-merge arming, the stats PR comment, the AGENT_STRIKE
+issue comment) ALSO lives here since 2026-07-09 (homelab FU-064/FU-043): the dispatcher's lifetime is
+decoupled from the worker's (a coordinator pod exits ~1 min after dispatch), so anything owned by the
+launcher's post-run block silently doesn't happen on that path — three strikes in one session were
+posted by hand before this moved in-pod. The launcher keeps a FALLBACK copy of each step, skipped when
+the stats line carries the corresponding `*_by_pod` flag. Requires issues:write on the worker token
+(git-token.yaml files). Everything is best-effort: a stats/bookkeeping failure must never fail the run.
 """
-import json, os, re, sys, time, urllib.parse, urllib.request
+import json, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request
 
 START_EPOCH = "/tmp/agent-start-epoch"
 USAGE_START = "/tmp/agent-usage-start"
 
 
 def or_usage():
-    """Cumulative USD usage for the current OpenRouter key (0.0 if unavailable)."""
+    """Cumulative USD usage for the current OpenRouter key. Returns None when UNKNOWN — a dead/
+    expired key 401s this endpoint, and failing INTO 0.0 made exactly the runs that die on key
+    problems report ~$0/negative cost (agent-runtime#12; the probe-fails-into-a-value class,
+    homelab TICK-LOG rule #6). The caller must treat None as 'unknown', never as a number."""
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
-        return 0.0
+        return None
     try:
         req = urllib.request.Request(
             "https://openrouter.ai/api/v1/key",
@@ -29,19 +37,20 @@ def or_usage():
         with urllib.request.urlopen(req, timeout=10) as r:
             return float(json.load(r)["data"].get("usage") or 0.0)
     except Exception:
-        return 0.0
+        return None
 
 
 def _read_float(path):
     try:
         return float(open(path).read().strip())
     except Exception:
-        return 0.0
+        return None
 
 
 def snapshot():
     open(START_EPOCH, "w").write(str(int(time.time())))
-    open(USAGE_START, "w").write(repr(or_usage()))
+    usage = or_usage()
+    open(USAGE_START, "w").write("" if usage is None else repr(usage))
 
 
 def parse_outcome(log_path):
@@ -65,7 +74,7 @@ def parse_outcome(log_path):
 def classify(log_path, stats):
     """Classify the run into (exit_status, error_class) — the FU-057 enabler.
 
-    exit_status ∈ clean | ci-failed | harness-death | auth-storm | budget-403 | timeout | failed
+    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | failed
     error_class = the dominant machine-detectable cause ('' when clean). Derived from run.log
     patterns + the run's OUTCOME (did it open a PR / pass CI). This is what makes the model-blacklist
     call possible (docs/agents/observability-and-retro.md §B1): the ledger needs to know *why* a run
@@ -93,13 +102,18 @@ def classify(log_path, stats):
         return len(re.findall(pat, text, re.IGNORECASE | re.MULTILINE))
 
     # Line-precise signatures (measured against the first oracle-fleet runs, 2026-07-09).
+    # git-auth is GIT/GH-specific (a dead ~1h App token at push/PR time), distinct from the LLM-key
+    # auth storm: a run whose WORK is green but whose push 401s must classify no-artifact/token-expiry,
+    # not auth-storm (oracle-fleet#1 attempt 1: 49 min of green work stranded by exactly this).
+    gitauth = n(r"authentication failed for 'https://github|fatal: could not read username|"
+                r"bad credentials|gh: .*http 401|failed to fetch oauth token")
     auth = n(r"authentication failed|401 unauthorized|403 forbidden|invalid api key|"
              r"no auth credentials|invalid_api_key")
     forbidden = n(r"403 forbidden")
     # OpenRouter budget cap / billing 402 — the retry-into-a-wall class. Precise phrasings only, so
     # legal/statute text containing "credit"/"quota" (2–3 stray hits/run) doesn't trip it.
     budget = n(r"insufficient (credit|quota|fund)|require[sd]? more credit|payment required|"
-               r"402 payment|quota exceeded|budget exceeded|out of credit")
+               r"402 payment|quota exceeded|budget exceeded|out of credit|key limit exceeded")
     truncation = n(r"-32602|response may have been truncated|maximum context length|"
                    r"context_length_exceeded")
     panic = n(r"thread '.*' panicked|panicked at|fatal runtime error")
@@ -107,12 +121,18 @@ def classify(log_path, stats):
                 r"timeout of \d+\s*ms exceeded")
 
     ci_passed = stats.get("ci_passed")
-    succeeded = bool(stats.get("pr_url")) or ci_passed is True
+    # SUCCESS requires the ARTIFACT — a PR. ci_passed alone is NOT clean: a run whose work went
+    # green in-pod but never reached GitHub (dead git token, unpushed branch) used to classify
+    # `clean` and poison the model-health pivot with a success that shipped nothing (oracle-fleet#1
+    # attempt 1). Those runs are `no-artifact` now.
+    succeeded = bool(stats.get("pr_url"))
 
     # Dominant failure signature (precedence: a broken key dooms the whole run, so it outranks the
     # truncation it usually ends on; ≥5 auth failures = a storm, not a transient token refresh).
     if budget:
         fail = ("budget-403", "budget-exhausted")
+    elif gitauth and ci_passed is True:
+        fail = ("no-artifact", "token-expiry")  # green work, dead git token at push/PR time
     elif auth >= 5:
         fail = ("auth-storm", "http-403-storm" if forbidden >= auth - forbidden else "http-401-storm")
     elif truncation:
@@ -130,9 +150,149 @@ def classify(log_path, stats):
         return "clean", ""
     if fail:
         return fail
+    if ci_passed is True:
+        return "no-artifact", "no-pr"  # green in-pod, no PR, no detectable infra cause
     if harness_exit != 0:
         return "failed", "nonzero-exit-%d" % harness_exit
     return "failed", "no-output"  # goose exited 0 but produced no PR and left no detectable error
+
+
+def _fresh_gh_env():
+    """Env for git/gh subprocesses with the FRESHEST git token. The mounted Secret file (rotated by
+    ESO every refreshInterval) beats the env var, which is frozen at pod start — a >60-min run's env
+    token is dead by the time finalize pushes (homelab FU-064b)."""
+    env = dict(os.environ)
+    path = os.environ.get("GIT_TOKEN_FILE", "/secrets/git/token")
+    try:
+        tok = open(path).read().strip()
+    except Exception:
+        tok = ""
+    if tok:
+        env["GH_TOKEN"] = tok
+    return env
+
+
+def salvage_push(stats):
+    """FU-064a: harness-owned terminal push. If the run ends without a PR but the work branch has
+    commits (and/or uncommitted state), commit + push it — a died run must leave a RESUMABLE branch,
+    never zero artifact. The push-early recipe rule failed to bind on 3 runs / 2 models (homelab
+    TICK-LOG 2026-07-09): this is the mechanism that replaces the exhortation. Best-effort."""
+    if stats.get("pr_url"):
+        return
+    wd = os.environ.get("WORKDIR", "/work/repo")
+    base = os.environ.get("BASE_REF", "master")
+    if not os.path.isdir(os.path.join(wd, ".git")):
+        return
+
+    def git(*args, timeout=60):
+        return subprocess.run(["git", "-C", wd, *args], capture_output=True, text=True,
+                              timeout=timeout, env=_fresh_gh_env())
+
+    try:
+        branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if not branch or branch in ("HEAD", base):
+            return
+        if git("status", "--porcelain").stdout.strip():
+            git("add", "-A")
+            git("commit", "-m", "wip(salvage): uncommitted state at terminal [agent-finalize]")
+        ahead = git("rev-list", "--count", "origin/%s..HEAD" % base).stdout.strip()
+        if not ahead.isdigit() or int(ahead) == 0:
+            return
+        # --force-with-lease: the branch may exist remotely from a prior attempt of the same round.
+        pushed = git("push", "--force-with-lease", "-u", "origin", branch, timeout=120)
+        if pushed.returncode == 0:
+            stats["salvaged_branch"] = branch
+            print("salvage: pushed %s (%s commits ahead of %s)" % (branch, ahead, base), flush=True)
+        else:
+            print("salvage: push FAILED for %s: %s (non-fatal)"
+                  % (branch, pushed.stderr.strip()[-300:]), file=sys.stderr)
+    except Exception as e:
+        print("salvage: non-fatal error: %s" % e, file=sys.stderr)
+
+
+def _last_lines(log_path, count=15):
+    try:
+        with open(log_path, errors="replace") as fh:
+            return "".join(fh.readlines()[-count:])
+    except Exception:
+        return ""
+
+
+def bookkeeping(stats, log_path):
+    """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR — arm auto-merge (an un-armed PR is
+    invisible to the ENTIRE merge path: updater, review reflex, GitHub auto-merge) + post the stats
+    comment; without a PR — post the AGENT_STRIKE comment to the issue (that comment IS the strike
+    store the coordinator walks the model chain by; keep the first line's format STABLE). Sets
+    *_by_pod flags in stats so the launcher's fallback skips what already happened."""
+    if not shutil.which("gh"):
+        print("bookkeeping: gh not in image — left to the launcher fallback", file=sys.stderr)
+        return
+    env = _fresh_gh_env()
+
+    def gh(*args, timeout=30):
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+    pr_url = stats.get("pr_url") or ""
+    task = os.environ.get("AGENT_TASK") or ""
+    repo_url = os.environ.get("REPO_URL") or ""
+    slug = ""
+    if repo_url.startswith("https://github.com/"):
+        slug = repo_url[len("https://github.com/"):].removesuffix(".git")
+
+    try:
+        if pr_url:
+            armed = gh("pr", "merge", pr_url, "--auto", "--squash")
+            if armed.returncode == 0:
+                stats["armed_by_pod"] = True
+                print("bookkeeping: auto-merge armed on " + pr_url, flush=True)
+            else:
+                print("bookkeeping: arm FAILED: %s (launcher/reflex re-arms)"
+                      % armed.stderr.strip()[-200:], file=sys.stderr)
+            body = (
+                "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
+                "| metric | value |\n|---|---|\n"
+                "| model | `%s` (%s) |\n"
+                "| cost | %s |\n"
+                "| duration | %ss |\n"
+                "| ci_passed | %s |\n"
+                "| exit / error_class | `%s` / `%s` |\n"
+                "| node / pod | `%s` / `%s` |\n\n"
+                "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
+            ) % (
+                stats.get("model", "?"), stats.get("harness", "?"),
+                ("$%s" % stats["cost_usd"]) if "cost_usd" in stats else "unknown (key unreadable)",
+                stats.get("duration_s", 0), stats.get("ci_passed", "?"),
+                stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
+                stats.get("node", "?"), stats.get("pod", "?"),
+                stats.get("project", "?"), task or "adhoc",
+            )
+            commented = gh("pr", "comment", pr_url, "--body", body)
+            if commented.returncode == 0:
+                stats["stats_comment_by_pod"] = True
+        elif task.startswith("issue-") and slug:
+            issue = task[len("issue-"):]
+            err = stats.get("error_class") or "unknown"
+            if stats.get("exit_status") in ("failed", "ci-failed"):
+                err = "unknown"
+            strike = "AGENT_STRIKE: model=%s error_class=%s round=%s session=%s" % (
+                os.environ.get("MODEL") or stats.get("model", "?"), err,
+                os.environ.get("AGENT_ROUND", "1"), stats.get("pod", "?"),
+            )
+            salvage_note = (
+                "\n\n**Resumable branch pushed:** `%s` — the next round can resume from it (C5), "
+                "not restart." % stats["salvaged_branch"]
+            ) if stats.get("salvaged_branch") else "\n\n(no resumable branch — nothing was committed)"
+            body = "%s%s\n\n<details><summary>last 15 log lines (%s)</summary>\n\n~~~text\n%s~~~\n\n</details>\n" % (
+                strike, salvage_note, stats.get("pod", "?"), _last_lines(log_path))
+            posted = gh("issue", "comment", issue, "--repo", slug, "--body", body)
+            if posted.returncode == 0:
+                stats["strike_by_pod"] = True
+                print("bookkeeping: strike posted to %s#%s" % (slug, issue), flush=True)
+            else:
+                print("bookkeeping: strike comment FAILED: %s (launcher fallback posts it)"
+                      % posted.stderr.strip()[-200:], file=sys.stderr)
+    except Exception as e:
+        print("bookkeeping: non-fatal error: %s" % e, file=sys.stderr)
 
 
 def push_metrics(stats, exit_status, error_class):
@@ -169,14 +329,19 @@ def push_metrics(stats, exit_status, error_class):
         lv(stats.get("model", "")), lv(stats.get("node", "")), lv(stats.get("harness", "")),
         lv(exit_status), lv(error_class),
     )
+    # cost is pushed ONLY when known — pushing 0 for an unreadable key re-creates the undercount
+    # agent-runtime#12 fixed (the ledger-reflex backfills unknowns from the activity API).
+    cost_line = ""
+    if "cost_usd" in stats:
+        cost_line = "# TYPE agent_run_cost_usd gauge\nagent_run_cost_usd{%s} %s\n" % (
+            labels, stats["cost_usd"])
     body = (
-        "# TYPE agent_run_cost_usd gauge\n"
-        'agent_run_cost_usd{%s} %s\n'
+        "%s"
         "# TYPE agent_run_duration_s gauge\n"
         'agent_run_duration_s{%s} %s\n'
         "# TYPE agent_run_total gauge\n"
         'agent_run_total{%s} 1\n'
-    ) % (labels, stats.get("cost_usd", 0), labels, stats.get("duration_s", 0), labels)
+    ) % (cost_line, labels, stats.get("duration_s", 0), labels)
     try:
         req = urllib.request.Request(
             url.rstrip("/") + group, data=body.encode(), method="PUT",
@@ -275,22 +440,40 @@ def upload_transcripts(stats, log_path):
 
 def finalize(log_path):
     time.sleep(6)  # let OpenRouter usage accounting settle for the last request(s)
+    start_epoch = _read_float(START_EPOCH)
     stats = {
         "project": os.environ.get("PROJECT", ""),
         "pod": os.environ.get("HOSTNAME", ""),
         "node": os.environ.get("NODE_NAME", ""),
         "harness": os.environ.get("HARNESS", ""),
         "model": os.environ.get("GOOSE_MODEL") or os.environ.get("MODEL", ""),
-        "duration_s": max(0, int(time.time()) - int(_read_float(START_EPOCH))),
-        "cost_usd": round(or_usage() - _read_float(USAGE_START), 4),
+        "duration_s": max(0, int(time.time()) - int(start_epoch)) if start_epoch else 0,
     }
+    # Cost = usage delta — but ONLY when both ends are readable. A dead key makes the end-read fail;
+    # subtracting against a failed probe produced negative costs on exactly the key-death runs
+    # (agent-runtime#12). Unknown is unknown: cost_unknown=true, and the ledger-reflex can backfill
+    # from the OpenRouter activity API (management key) later.
+    usage_start, usage_end = _read_float(USAGE_START), or_usage()
+    if usage_start is not None and usage_end is not None:
+        stats["cost_usd"] = max(0.0, round(usage_end - usage_start, 4))
+    else:
+        stats["cost_unknown"] = True
     stats.update(parse_outcome(log_path) if log_path else {})
+    # FU-064a: harness-owned terminal push BEFORE classification/bookkeeping, so the salvaged branch
+    # rides the stats line and the strike comment.
+    salvage_push(stats)
     # FU-057: classify the run so the ledger/dashboards know *why* it ended (the model-blacklist
     # enabler). Fold exit_status+error_class into stats so they ride the AGENT_RUN_STATS line (→ the
     # launcher's PR comment + Loki) AND the manifest + pushed metrics below.
     exit_status, error_class = classify(log_path, stats)
     stats["exit_status"] = exit_status
     stats["error_class"] = error_class
+    # FU-064/FU-043: in-pod GitHub bookkeeping BEFORE the stats line, so the *_by_pod flags it sets
+    # ride the line and the launcher fallback knows what to skip.
+    try:
+        bookkeeping(stats, log_path)
+    except Exception as e:
+        print("bookkeeping: non-fatal error: %s" % e, file=sys.stderr)
     print("AGENT_RUN_STATS " + json.dumps(stats, separators=(",", ":")), flush=True)
     try:  # FU-057 §B1: worker $ + outcome → Prometheus (goose has no OTLP rail)
         push_metrics(stats, exit_status, error_class)

@@ -11,11 +11,27 @@ BASE_REF="${BASE_REF:-master}"
 WORK_BRANCH="${WORK_BRANCH:-agent/$(date -u +%Y%m%d-%H%M%S)}"
 WORKDIR="${WORKDIR:-/work/repo}"
 
-# Git auth: if a scoped token is present (minted by the ESO GithubAccessToken generator → GH_TOKEN),
-# use it for github.com over HTTPS so the agent can clone PRIVATE repos and push its branch. `gh`
-# picks up GH_TOKEN automatically for `gh pr create`. (v2 / ADR-081: injected by the egress proxy,
-# never held in the pod.) HOME is writable here (unlike the jail), so a global credential helper is fine.
-if [ -n "${GH_TOKEN:-}" ]; then
+# Git auth — READ AT USE TIME, not frozen at start (homelab FU-064b). ESO mints ~1h App tokens and
+# rewrites the Secret on its refreshInterval, but an env var snapshots the token at pod start: any
+# run >~55 min pushes with a dead token (oracle-fleet#1 attempts 1+3, 2026-07-09). When the Secret is
+# VOLUME-mounted (GIT_TOKEN_FILE), the credential helper cats the file per git operation and a `gh`
+# wrapper re-reads it per invocation — kubelet rewrites mounted Secret files on rotation, so long
+# runs always push with a live token. Env GH_TOKEN stays as the fallback for launchers that predate
+# the mount. (v2 / ADR-081 FU-018: injected by the egress proxy, never held in the pod at all.)
+GIT_TOKEN_FILE="${GIT_TOKEN_FILE:-/secrets/git/token}"
+if [ -s "$GIT_TOKEN_FILE" ]; then
+  git config --global credential.helper \
+    '!f() { echo username=x-access-token; echo "password=$(cat '"$GIT_TOKEN_FILE"')"; }; f'
+  GH_BIN="$(command -v gh || true)"
+  if [ -n "$GH_BIN" ]; then
+    mkdir -p "$HOME/bin"
+    printf '#!/bin/sh\nGH_TOKEN="$(cat %s)" exec %s "$@"\n' "$GIT_TOKEN_FILE" "$GH_BIN" > "$HOME/bin/gh"
+    chmod +x "$HOME/bin/gh"
+    export PATH="$HOME/bin:$PATH"
+  fi
+  git config --global user.name  "${GIT_AUTHOR_NAME:-homelab-agent}"
+  git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@teststuff.net}"
+elif [ -n "${GH_TOKEN:-}" ]; then
   git config --global credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
   git config --global user.name  "${GIT_AUTHOR_NAME:-homelab-agent}"
   git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@teststuff.net}"
@@ -26,7 +42,17 @@ if [ ! -d "$WORKDIR/.git" ]; then
   git clone --depth 50 --branch "$BASE_REF" "$REPO_URL" "$WORKDIR"
 fi
 cd "$WORKDIR"
-git checkout -B "$WORK_BRANCH"
+# Deterministic branch state (old finding C, homelab TICK-LOG 2026-07-09): when the caller names an
+# EXISTING remote branch (a fix round resuming its PR branch, or a salvaged WIP branch), check it out
+# tracking the remote head — never leave "which branch" to the model (round 3 of oracle-fleet#1 died
+# working a throwaway branch that could never reach its PR). A fresh WORK_BRANCH forks from BASE_REF.
+if git ls-remote --exit-code --heads origin "$WORK_BRANCH" >/dev/null 2>&1; then
+  echo "→ resuming existing remote branch $WORK_BRANCH"
+  git fetch origin "$WORK_BRANCH"
+  git checkout -B "$WORK_BRANCH" FETCH_HEAD
+else
+  git checkout -B "$WORK_BRANCH"
+fi
 
 # Provenance, not config: record WHICH harness + model produced each commit. The model is a call-time
 # arg (agent-session --model → GOOSE_MODEL), deliberately NOT pinned in the repo, so history is where
