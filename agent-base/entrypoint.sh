@@ -63,4 +63,9 @@ echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(comm
 # post-run delta = this run's cost/duration. Best-effort; never blocks the run.
 agent-finalize --snapshot || true
 
+# Storm hard-stop (#8, homelab FU-021): supervise /tmp/run.log and SIGTERM the harness (never the
+# shell pipeline — finalize must still run) on a sustained dead-key auth/credit retry storm.
+# Backgrounded before the exec, so it rides along as a child of PID 1. STORM_WATCHDOG=off disables.
+agent-storm-watchdog &
+
 exec "$@"

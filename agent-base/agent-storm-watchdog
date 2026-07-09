@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# agent-storm-watchdog — hard-stop for dead-key retry storms (#8, homelab FU-021).
+#
+# goose v1.28's agent loop has no per-error-class stop: with a recipe final_output declared, every
+# provider error triggers the final-output continuation and a FRESH request against the dead key,
+# bounded only by GOOSE_MAX_TURNS (default 1000; measured live: 530 consecutive auth failures,
+# exit 0, no PR). This supervisor watches the harness log and SIGTERMs the HARNESS — never the
+# shell pipeline — so `… | tee /tmp/run.log; agent-finalize /tmp/run.log` still completes: finalize
+# classifies the death (error_class=auth-storm|budget-403), uploads transcripts, and the launcher
+# posts the AGENT_STRIKE issue comment. Remove when upstream goose grows an
+# abort-after-K-consecutive-provider-errors option.
+#
+# Storm rule (two-poll confirmation, so a burst of e.g. auth-test output can't false-trigger):
+#   kill only when the last $STORM_WINDOW log lines contain ≥ $STORM_THRESHOLD auth/credit-failure
+#   matches on TWO consecutive polls AND new matches arrived in between (a real storm keeps
+#   producing failures and nothing else; a passing test suite scrolls its burst out of the window
+#   or stops adding matches). Patterns mirror agent-finalize's classify() — keep them in step.
+#
+#   Env: STORM_WATCHDOG=off to disable · STORM_LOG=/tmp/run.log · STORM_THRESHOLD=10
+#        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
+set -u
+
+[ "${STORM_WATCHDOG:-on}" = "off" ] && exit 0
+
+LOG="${STORM_LOG:-/tmp/run.log}"
+THRESHOLD="${STORM_THRESHOLD:-10}"
+WINDOW="${STORM_WINDOW:-50}"
+POLL_S="${STORM_POLL_S:-10}"
+GRACE_S="${STORM_GRACE_S:-15}"
+
+PAT='authentication failed|401 unauthorized|403 forbidden|invalid api key|no auth credentials|invalid_api_key|insufficient (credit|quota|fund)|require[sd]? more credit|payment required|402 payment|quota exceeded|budget exceeded|out of credit'
+
+prev_hot=0
+prev_total=0
+while :; do
+  sleep "$POLL_S"
+  [ -f "$LOG" ] || continue
+  total="$(grep -ciE "$PAT" "$LOG" 2>/dev/null || true)"; total="${total:-0}"
+  dens="$(tail -n "$WINDOW" "$LOG" 2>/dev/null | grep -ciE "$PAT" || true)"; dens="${dens:-0}"
+  if [ "$dens" -ge "$THRESHOLD" ] && [ "$total" -gt "$prev_total" ] && [ "$prev_hot" = 1 ]; then
+    echo "AGENT_STORM_WATCHDOG: ${dens} auth/credit failures in the last ${WINDOW} log lines" \
+         "(${total} total, still growing) — terminating the harness (#8, homelab FU-021)"
+    pkill -TERM -x goose 2>/dev/null
+    pkill -TERM -x opencode 2>/dev/null
+    sleep "$GRACE_S"
+    pkill -KILL -x goose 2>/dev/null
+    pkill -KILL -x opencode 2>/dev/null
+    exit 0
+  fi
+  [ "$dens" -ge "$THRESHOLD" ] && prev_hot=1 || prev_hot=0
+  prev_total="$total"
+done
