@@ -5,3 +5,5 @@
 
 # SBOM/build artifacts
 sbom.spdx.json
+__pycache__/
+*.pyc
