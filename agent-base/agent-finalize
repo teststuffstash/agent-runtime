@@ -451,6 +451,9 @@ def finalize(log_path):
         "node": os.environ.get("NODE_NAME", ""),
         "harness": os.environ.get("HARNESS", ""),
         "model": os.environ.get("GOOSE_MODEL") or os.environ.get("MODEL", ""),
+        # KEY_HASH (operator-written into the session Secret) → the ledger-reflex can backfill a
+        # cost_unknown run from the management API after the CR/pod are gone (FU-057 §ledger).
+        "key_hash": os.environ.get("OPENROUTER_KEY_HASH", ""),
         "duration_s": max(0, int(time.time()) - int(start_epoch)) if start_epoch else 0,
     }
     # Cost = usage delta — but ONLY when both ends are readable. A dead key makes the end-read fail;
