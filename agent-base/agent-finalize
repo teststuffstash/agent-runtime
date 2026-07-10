@@ -29,9 +29,13 @@ def or_usage():
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         return None
+    # ADR-087: under credential injection the pod holds an opaque ref only the egress proxy can
+    # resolve — so this read MUST ride the proxy (OPENROUTER_HOST) when it's set; direct-to-upstream
+    # would 401 the ref and turn every injected run's cost into cost_unknown.
+    base = os.environ.get("OPENROUTER_HOST") or "https://openrouter.ai"
     try:
         req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/key",
+            base.rstrip("/") + "/api/v1/key",
             headers={"Authorization": "Bearer " + key},
         )
         with urllib.request.urlopen(req, timeout=10) as r:

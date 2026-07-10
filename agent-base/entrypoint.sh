@@ -19,7 +19,39 @@ WORKDIR="${WORKDIR:-/work/repo}"
 # runs always push with a live token. Env GH_TOKEN stays as the fallback for launchers that predate
 # the mount. (v2 / ADR-081 FU-018: injected by the egress proxy, never held in the pod at all.)
 GIT_TOKEN_FILE="${GIT_TOKEN_FILE:-/secrets/git/token}"
-if [ -s "$GIT_TOKEN_FILE" ]; then
+# ADR-087 leg B: when the launcher provides GIT_CRED_BROKER_URL, git/gh fetch the LIVE token per
+# operation from the egress proxy's /git-token endpoint — the pod holds no git credential at all
+# (the mount/env below remain as fallback until FU-020 removes them). curl is in the image.
+if [ -n "${GIT_CRED_BROKER_URL:-}" ]; then
+  mkdir -p "$HOME/bin"
+  # Fetch-token script (single source for the helper AND the gh wrapper): broker → mounted file →
+  # env, in that order; each fallback is loud-capable but never blocks the operation chain.
+  cat > "$HOME/bin/agent-git-token" <<TOKENFETCH
+#!/bin/sh
+curl -fsS --max-time 10 '$GIT_CRED_BROKER_URL' 2>/dev/null \
+  || cat '$GIT_TOKEN_FILE' 2>/dev/null \
+  || printf %s "\${GH_TOKEN:-}"
+TOKENFETCH
+  chmod +x "$HOME/bin/agent-git-token"
+  cat > "$HOME/bin/git-cred-helper" <<'CREDHELPER'
+#!/bin/sh
+echo username=x-access-token
+echo "password=$($HOME/bin/agent-git-token)"
+CREDHELPER
+  chmod +x "$HOME/bin/git-cred-helper"
+  git config --global credential.helper "$HOME/bin/git-cred-helper"
+  GH_BIN="$(command -v gh || true)"
+  if [ -n "$GH_BIN" ]; then
+    cat > "$HOME/bin/gh" <<GHWRAP
+#!/bin/sh
+GH_TOKEN="\$(\$HOME/bin/agent-git-token)" exec $GH_BIN "\$@"
+GHWRAP
+    chmod +x "$HOME/bin/gh"
+  fi
+  export PATH="$HOME/bin:$PATH"
+  git config --global user.name  "${GIT_AUTHOR_NAME:-homelab-agent}"
+  git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@teststuff.net}"
+elif [ -s "$GIT_TOKEN_FILE" ]; then
   git config --global credential.helper \
     '!f() { echo username=x-access-token; echo "password=$(cat '"$GIT_TOKEN_FILE"')"; }; f'
   GH_BIN="$(command -v gh || true)"
