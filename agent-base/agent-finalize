@@ -208,6 +208,13 @@ def classify(log_path, stats):
         return "clean", ""
     if fail:
         return fail
+    # Adhoc rides (task not issue-*/pr-*: validations, interactive experiments) expect NO PR —
+    # "no artifact" is their normal clean end, not a failure. Without this, a PASSING validation
+    # ride lands in the ledger as failed/no-output and poisons the model-health pivot (seen live
+    # on the FU-066 acceptance ride, 2026-07-16).
+    task = os.environ.get("AGENT_TASK") or ""
+    if not (task.startswith("issue-") or task.startswith("pr-")) and harness_exit == 0:
+        return "clean", ""
     if ci_passed is True:
         return "no-artifact", "no-pr"  # green in-pod, no PR, no detectable infra cause
     if harness_exit != 0:
