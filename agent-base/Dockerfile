@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # agent-base — the homelab agent platform's harness image (ADR-077/078, docs/agents/).
 #
-# Bundles the *harnesses* (goose + opencode) plus the *common* project toolchain that recurs across
+# Bundles the *harnesses* (goose + opencode + claude-code, homelab FU-066) plus the *common* project toolchain that recurs across
 # the agent-target repos (python/uv/kubectl/gitleaks) on a devbox/nix base. The cloned repo's own
 # devbox.json stays AUTHORITATIVE and still runs at startup (boot-from-git) — baking here is purely a
 # /nix-store cache-warm: it realises the shared closure at build time so the runtime `devbox install`
@@ -39,6 +39,18 @@ RUN chmod +x /usr/local/bin/agent-entrypoint /usr/local/bin/agent-finalize /usr/
 # Login shells (bash -l) re-read /etc/profile and would drop the harness bin from PATH; re-add it so
 # interactive sessions and recipes find goose/opencode regardless of shell type.
 RUN printf 'export PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH\n' > /etc/profile.d/agent-path.sh
+
+# Pre-seed the claude harness (homelab FU-066): a headless `claude -p` in a fresh pod would otherwise
+# stop on the onboarding wizard, the /work/repo trust dialog, or the bypass-permissions warning — the
+# same three prompts the agent-coordinator image seeds (keep the two in sync). Auth is deliberately
+# NOT here: the pod carries only ANTHROPIC_BASE_URL + an opaque `ref:` token; the egress proxy
+# injects the real subscription credential (ADR-087 leg A).
+RUN mkdir -p /home/devbox/.claude \
+    && printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{"/work/repo":{"hasTrustDialogAccepted":true}}}' \
+        > /home/devbox/.claude.json \
+    && printf '%s\n' '{"permissions":{"allow":["Bash(*)","Read(*)","Edit(*)","Write(*)","WebSearch(*)","WebFetch(*)"]},"skipDangerousModePermissionPrompt":true}' \
+        > /home/devbox/.claude/settings.json \
+    && chown -R devbox:devbox /home/devbox/.claude /home/devbox/.claude.json
 
 # Run as a NUMERIC non-root uid so Kubernetes `runAsNonRoot` can verify it without a per-pod
 # runAsUser (the 'devbox' user is uid 1000 in the base image).

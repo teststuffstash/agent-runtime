@@ -13,7 +13,8 @@
     "s5cmd@latest",
     "kubectl@latest",
     "python@3.11",
-    "uv@latest"
+    "uv@latest",
+    "claude-code@latest"
   ],
   "shell": {
     "init_hook": [],
