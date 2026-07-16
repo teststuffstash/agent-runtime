@@ -71,7 +71,9 @@ def claude_usage():
                             ev = json.loads(line)
                         except Exception:
                             continue
-                        usage = (ev.get("message") or {}).get("usage") if isinstance(ev, dict) else None
+                        if not isinstance(ev, dict):
+                            continue  # a non-dict line must not abort the rest of the file
+                        usage = (ev.get("message") or {}).get("usage")
                         if ev.get("type") == "assistant" and usage:
                             found = True
                             turns += 1
@@ -394,6 +396,14 @@ def push_metrics(stats, exit_status, error_class):
     if "cost_usd" in stats:
         cost_line = "# TYPE agent_run_cost_usd gauge\nagent_run_cost_usd{%s} %s\n" % (
             labels, stats["cost_usd"])
+    # Subscription (claude) runs have no cost_usd — their usage record is tokens/turns (+ the
+    # API-equivalent cost when the run emitted one). Push whichever exist so the model-health
+    # and cost dashboards see the claude tier at all (homelab FU-066b).
+    for key, metric in (("turns", "agent_run_turns"), ("tokens_in", "agent_run_tokens_in"),
+                        ("tokens_out", "agent_run_tokens_out"),
+                        ("cost_usd_equiv", "agent_run_cost_usd_equiv")):
+        if key in stats:
+            cost_line += "# TYPE %s gauge\n%s{%s} %s\n" % (metric, metric, labels, stats[key])
     body = (
         "%s"
         "# TYPE agent_run_duration_s gauge\n"

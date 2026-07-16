@@ -115,6 +115,14 @@ if [ -f devbox.json ]; then
   devbox install
 fi
 
+# claude harness (FU-066): the image pre-seeds trust for the default /work/repo, but WORKDIR is
+# env-overridable — regenerate ~/.claude.json for the ACTUAL workdir so a headless `claude -p`
+# never hangs on the trust dialog. Settings (bypass-permissions warning skip) stay as baked.
+if command -v claude >/dev/null 2>&1; then
+  printf '{"hasCompletedOnboarding":true,"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' \
+    "$WORKDIR" > "$HOME/.claude.json"
+fi
+
 echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)  claude=$(command -v claude)"
 
 # Baseline for the end-of-run stats (agent-finalize): session start time + OpenRouter usage now, so the

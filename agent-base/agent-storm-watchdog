@@ -42,9 +42,11 @@ while :; do
          "(${total} total, still growing) — terminating the harness (#8, homelab FU-021)"
     pkill -TERM -x goose 2>/dev/null
     pkill -TERM -x opencode 2>/dev/null
+    pkill -TERM -x claude 2>/dev/null   # claude harness (FU-066) storms the same way on a dead ref/proxy
     sleep "$GRACE_S"
     pkill -KILL -x goose 2>/dev/null
     pkill -KILL -x opencode 2>/dev/null
+    pkill -KILL -x claude 2>/dev/null
     exit 0
   fi
   [ "$dens" -ge "$THRESHOLD" ] && prev_hot=1 || prev_hot=0
