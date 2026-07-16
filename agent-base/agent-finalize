@@ -51,6 +51,58 @@ def _read_float(path):
         return None
 
 
+def claude_usage():
+    """Tokens/turns for a claude-harness run — the FU-066(b) stand-in for cost_usd (subscription
+    tier: ~$0 marginal, so the honest record is usage, not a fake dollar figure). Summed from the
+    session jsonl under ~/.claude/projects — the pod is fresh per run, so everything there is this
+    run's. `turns` counts assistant messages (≈ API calls, the same grain as goose's turn cap).
+    Returns {} when no session file is found (e.g. claude died before writing one)."""
+    base = os.path.expanduser("~/.claude/projects")
+    tin = tout = cache_read = turns = 0
+    found = False
+    for root, _, names in os.walk(base):
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            try:
+                with open(os.path.join(root, name), errors="replace") as fh:
+                    for line in fh:
+                        try:
+                            ev = json.loads(line)
+                        except Exception:
+                            continue
+                        usage = (ev.get("message") or {}).get("usage") if isinstance(ev, dict) else None
+                        if ev.get("type") == "assistant" and usage:
+                            found = True
+                            turns += 1
+                            tin += int(usage.get("input_tokens") or 0) \
+                                + int(usage.get("cache_creation_input_tokens") or 0)
+                            cache_read += int(usage.get("cache_read_input_tokens") or 0)
+                            tout += int(usage.get("output_tokens") or 0)
+            except Exception:
+                continue
+    if not found:
+        return {}
+    return {"turns": turns, "tokens_in": tin, "tokens_cache_read": cache_read, "tokens_out": tout}
+
+
+def claude_cost_equiv(log_path):
+    """Opportunistic API-equivalent cost: `claude -p --output-format json` ends the log with a
+    result object carrying total_cost_usd. Absent (plain text output), returns None — tokens/turns
+    above remain the record."""
+    try:
+        text = open(log_path, errors="replace").read()
+    except Exception:
+        return None
+    val = None
+    for m in re.finditer(r'"total_cost_usd"\s*:\s*([0-9.eE+-]+)', text):
+        try:
+            val = float(m.group(1))
+        except ValueError:
+            continue
+    return val
+
+
 def snapshot():
     open(START_EPOCH, "w").write(str(int(time.time())))
     usage = or_usage()
@@ -264,7 +316,10 @@ def bookkeeping(stats, log_path):
                 "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
             ) % (
                 stats.get("model", "?"), stats.get("harness", "?"),
-                ("$%s" % stats["cost_usd"]) if "cost_usd" in stats else "unknown (key unreadable)",
+                ("$%s" % stats["cost_usd"]) if "cost_usd" in stats
+                else ("subscription — %s turns, %s in / %s out tok" % (
+                    stats.get("turns", "?"), stats.get("tokens_in", "?"), stats.get("tokens_out", "?"),
+                )) if stats.get("subscription") else "unknown (key unreadable)",
                 stats.get("duration_s", 0), stats.get("ci_passed", "?"),
                 stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
                 stats.get("node", "?"), stats.get("pod", "?"),
@@ -414,6 +469,17 @@ def upload_transcripts(stats, log_path):
             rel = os.path.relpath(p, sdir)
             if put(p, "%s/goose-sessions/%s" % (prefix, rel)):
                 files.append("goose-sessions/" + rel)
+    # claude's session jsonl (FU-066 claude harness — same fresh-pod argument). The transcripts-sync
+    # treats any *.jsonl under the run prefix as a claude session, so these land viewer-ready.
+    cdir = os.path.expanduser("~/.claude/projects")
+    for root, _, names in os.walk(cdir):
+        for n in names:
+            if not n.endswith(".jsonl"):
+                continue
+            p = os.path.join(root, n)
+            rel = os.path.relpath(p, cdir)
+            if put(p, "%s/claude-sessions/%s" % (prefix, rel)):
+                files.append("claude-sessions/" + rel)
 
     manifest = {
         "role": "worker",
@@ -456,15 +522,25 @@ def finalize(log_path):
         "key_hash": os.environ.get("OPENROUTER_KEY_HASH", ""),
         "duration_s": max(0, int(time.time()) - int(start_epoch)) if start_epoch else 0,
     }
-    # Cost = usage delta — but ONLY when both ends are readable. A dead key makes the end-read fail;
-    # subtracting against a failed probe produced negative costs on exactly the key-death runs
-    # (agent-runtime#12). Unknown is unknown: cost_unknown=true, and the ledger-reflex can backfill
-    # from the OpenRouter activity API (management key) later.
-    usage_start, usage_end = _read_float(USAGE_START), or_usage()
-    if usage_start is not None and usage_end is not None:
-        stats["cost_usd"] = max(0.0, round(usage_end - usage_start, 4))
+    if stats.get("harness") == "claude":
+        # Subscription tier (FU-066): no OpenRouter key in play, marginal cost ~$0 — the honest
+        # record is tokens/turns (claude_usage), NOT cost_unknown (that flag means "backfill me
+        # from the OpenRouter activity API", which can never apply here — no key_hash).
+        stats["subscription"] = True
+        stats.update(claude_usage())
+        equiv = claude_cost_equiv(log_path) if log_path else None
+        if equiv is not None:
+            stats["cost_usd_equiv"] = round(equiv, 4)
     else:
-        stats["cost_unknown"] = True
+        # Cost = usage delta — but ONLY when both ends are readable. A dead key makes the end-read
+        # fail; subtracting against a failed probe produced negative costs on exactly the key-death
+        # runs (agent-runtime#12). Unknown is unknown: cost_unknown=true, and the ledger-reflex can
+        # backfill from the OpenRouter activity API (management key) later.
+        usage_start, usage_end = _read_float(USAGE_START), or_usage()
+        if usage_start is not None and usage_end is not None:
+            stats["cost_usd"] = max(0.0, round(usage_end - usage_start, 4))
+        else:
+            stats["cost_unknown"] = True
     stats.update(parse_outcome(log_path) if log_path else {})
     # FU-064a: harness-owned terminal push BEFORE classification/bookkeeping, so the salvaged branch
     # rides the stats line and the strike comment.

@@ -115,7 +115,7 @@ if [ -f devbox.json ]; then
   devbox install
 fi
 
-echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)"
+echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)  claude=$(command -v claude)"
 
 # Baseline for the end-of-run stats (agent-finalize): session start time + OpenRouter usage now, so the
 # post-run delta = this run's cost/duration. Best-effort; never blocks the run.
