@@ -319,8 +319,9 @@ def bookkeeping(stats, log_path):
             ) % (
                 stats.get("model", "?"), stats.get("harness", "?"),
                 ("$%s" % stats["cost_usd"]) if "cost_usd" in stats
-                else ("subscription — %s turns, %s in / %s out tok" % (
-                    stats.get("turns", "?"), stats.get("tokens_in", "?"), stats.get("tokens_out", "?"),
+                else ("subscription — %s turns, %s in (+%s cached) / %s out tok" % (
+                    stats.get("turns", "?"), stats.get("tokens_in", "?"),
+                    stats.get("tokens_cache_read", 0), stats.get("tokens_out", "?"),
                 )) if stats.get("subscription") else "unknown (key unreadable)",
                 stats.get("duration_s", 0), stats.get("ci_passed", "?"),
                 stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",

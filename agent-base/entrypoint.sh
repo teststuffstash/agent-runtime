@@ -117,10 +117,13 @@ fi
 
 # claude harness (FU-066): the image pre-seeds trust for the default /work/repo, but WORKDIR is
 # env-overridable — regenerate ~/.claude.json for the ACTUAL workdir so a headless `claude -p`
-# never hangs on the trust dialog. Settings (bypass-permissions warning skip) stay as baked.
+# never hangs on the trust dialog. jq-composed so an exotic WORKDIR can't silently corrupt the
+# JSON (the failure mode is a hang, not a crash — reviewer finding, agent-runtime#14). Settings
+# (bypass-permissions warning skip) stay as baked.
 if command -v claude >/dev/null 2>&1; then
-  printf '{"hasCompletedOnboarding":true,"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' \
-    "$WORKDIR" > "$HOME/.claude.json"
+  jq -n --arg d "$WORKDIR" \
+    '{hasCompletedOnboarding: true, projects: {($d): {hasTrustDialogAccepted: true}}}' \
+    > "$HOME/.claude.json"
 fi
 
 echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)  claude=$(command -v claude)"
