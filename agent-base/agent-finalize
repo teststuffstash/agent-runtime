@@ -277,6 +277,39 @@ def salvage_push(stats):
         print("salvage: non-fatal error: %s" % e, file=sys.stderr)
 
 
+def derive_pr_url(stats):
+    """Deterministic PR discovery (homelab TICK-LOG meta-7 retro (a) — the FU-079 class). The
+    self-reported pr_url comes from the goose recipe's `response.json_schema`, a goose-only
+    feature: claude-harness runs NEVER emit it (3/3 un-armed PRs on the subscription tier), and
+    any model can simply forget it. The pod's checked-out branch is ground truth — ask GitHub
+    which open PR has it as head and adopt that URL. Everything downstream keys off pr_url
+    (arming, stats-comment-vs-strike routing, classification, salvage skip), so this runs before
+    all of them. Rule #6: a FAILED probe is not "no PR" — pr_url stays unset and downstream
+    keeps the conservative pre-existing path."""
+    if stats.get("pr_url") or not shutil.which("gh"):
+        return
+    wd = os.environ.get("WORKDIR", "/work/repo")
+    base = os.environ.get("BASE_REF", "master")
+    if not os.path.isdir(os.path.join(wd, ".git")):
+        return
+    try:
+        branch = subprocess.run(["git", "-C", wd, "rev-parse", "--abbrev-ref", "HEAD"],
+                                capture_output=True, text=True, timeout=30).stdout.strip()
+        if not branch or branch in ("HEAD", base):
+            return
+        probe = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--state", "open",
+             "--json", "url", "--jq", ".[0].url // empty"],
+            capture_output=True, text=True, timeout=30, env=_fresh_gh_env(), cwd=wd)
+        url = probe.stdout.strip()
+        if probe.returncode == 0 and url.startswith("https://"):
+            stats["pr_url"] = url
+            stats["pr_url_derived"] = True
+            print("finalize: pr_url derived from branch %s -> %s" % (branch, url), flush=True)
+    except Exception as e:
+        print("finalize: pr_url derivation non-fatal error: %s" % e, file=sys.stderr)
+
+
 def _last_lines(log_path, count=15):
     try:
         with open(log_path, errors="replace") as fh:
@@ -562,6 +595,10 @@ def finalize(log_path):
         else:
             stats["cost_unknown"] = True
     stats.update(parse_outcome(log_path) if log_path else {})
+    # Ground-truth pr_url BEFORE salvage/classify/bookkeeping — they all key off it (a missing
+    # pr_url on a PR-ful run skipped arming, mis-routed the stats comment into a strike, and
+    # force-pushed a pointless salvage).
+    derive_pr_url(stats)
     # FU-064a: harness-owned terminal push BEFORE classification/bookkeeping, so the salvaged branch
     # rides the stats line and the strike comment.
     salvage_push(stats)
