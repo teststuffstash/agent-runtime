@@ -239,16 +239,36 @@ def _fresh_gh_env():
     return env
 
 
+def _resolve_branch():
+    """The shared work-branch resolution (salvage_push + derive_pr_url must not drift): returns
+    (wd, base, branch) with branch=None when there's no usable work branch (no repo, detached
+    HEAD, or still sitting on the base branch)."""
+    wd = os.environ.get("WORKDIR", "/work/repo")
+    base = os.environ.get("BASE_REF", "master")
+    if not os.path.isdir(os.path.join(wd, ".git")):
+        return wd, base, None
+    try:
+        branch = subprocess.run(["git", "-C", wd, "rev-parse", "--abbrev-ref", "HEAD"],
+                                capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:
+        branch = ""
+    if not branch or branch in ("HEAD", base):
+        return wd, base, None
+    return wd, base, branch
+
+
 def salvage_push(stats):
     """FU-064a: harness-owned terminal push. If the run ends without a PR but the work branch has
     commits (and/or uncommitted state), commit + push it — a died run must leave a RESUMABLE branch,
     never zero artifact. The push-early recipe rule failed to bind on 3 runs / 2 models (homelab
-    TICK-LOG 2026-07-09): this is the mechanism that replaces the exhortation. Best-effort."""
+    TICK-LOG 2026-07-09): this is the mechanism that replaces the exhortation. Best-effort.
+    MUST run before derive_pr_url: the pr_url guard below is about the recipe's SELF-report (PR
+    opened this round → nothing to salvage); a derived pr_url can come from an OLDER still-open PR
+    on a resumed branch, and skipping on that would silently drop this round's commits."""
     if stats.get("pr_url"):
         return
-    wd = os.environ.get("WORKDIR", "/work/repo")
-    base = os.environ.get("BASE_REF", "master")
-    if not os.path.isdir(os.path.join(wd, ".git")):
+    wd, base, branch = _resolve_branch()
+    if branch is None:
         return
 
     def git(*args, timeout=60):
@@ -256,9 +276,6 @@ def salvage_push(stats):
                               timeout=timeout, env=_fresh_gh_env())
 
     try:
-        branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        if not branch or branch in ("HEAD", base):
-            return
         if git("status", "--porcelain").stdout.strip():
             git("add", "-A")
             git("commit", "-m", "wip(salvage): uncommitted state at terminal [agent-finalize]")
@@ -275,6 +292,35 @@ def salvage_push(stats):
                   % (branch, pushed.stderr.strip()[-300:]), file=sys.stderr)
     except Exception as e:
         print("salvage: non-fatal error: %s" % e, file=sys.stderr)
+
+
+def derive_pr_url(stats):
+    """Deterministic PR discovery (homelab TICK-LOG meta-7 retro (a) — the FU-079 class). The
+    self-reported pr_url comes from the goose recipe's `response.json_schema`, a goose-only
+    feature: claude-harness runs NEVER emit it (3/3 un-armed PRs on the subscription tier), and
+    any model can simply forget it. The pod's checked-out branch is ground truth — ask GitHub
+    which open PR has it as head and adopt that URL. Arming, stats-comment-vs-strike routing, and
+    classification all key off pr_url, so this runs before them — but AFTER salvage_push, whose
+    self-report-only skip must not be disabled by a stale still-open PR on a resumed branch.
+    Rule #6: a FAILED probe is not "no PR" — pr_url stays unset and downstream keeps the
+    conservative pre-existing path."""
+    if stats.get("pr_url") or not shutil.which("gh"):
+        return
+    wd, base, branch = _resolve_branch()
+    if branch is None:
+        return
+    try:
+        probe = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--base", base, "--state", "open",
+             "--json", "url", "--jq", ".[0].url // empty"],
+            capture_output=True, text=True, timeout=30, env=_fresh_gh_env(), cwd=wd)
+        url = probe.stdout.strip()
+        if probe.returncode == 0 and url.startswith("https://"):
+            stats["pr_url"] = url
+            stats["pr_url_derived"] = True
+            print("finalize: pr_url derived from branch %s -> %s" % (branch, url), flush=True)
+    except Exception as e:
+        print("finalize: pr_url derivation non-fatal error: %s" % e, file=sys.stderr)
 
 
 def _last_lines(log_path, count=15):
@@ -563,8 +609,13 @@ def finalize(log_path):
             stats["cost_unknown"] = True
     stats.update(parse_outcome(log_path) if log_path else {})
     # FU-064a: harness-owned terminal push BEFORE classification/bookkeeping, so the salvaged branch
-    # rides the stats line and the strike comment.
+    # rides the stats line and the strike comment. Also before derive_pr_url: a resumed branch can
+    # carry an OLDER still-open PR, and a derived pr_url must never suppress the salvage of THIS
+    # round's commits (review finding, #17).
     salvage_push(stats)
+    # Ground-truth pr_url before classify/bookkeeping — both key off it (a missing pr_url on a
+    # PR-ful run skipped arming and mis-routed the stats comment into a strike).
+    derive_pr_url(stats)
     # FU-057: classify the run so the ledger/dashboards know *why* it ended (the model-blacklist
     # enabler). Fold exit_status+error_class into stats so they ride the AGENT_RUN_STATS line (→ the
     # launcher's PR comment + Loki) AND the manifest + pushed metrics below.
