@@ -28,7 +28,11 @@ if [ -n "${GIT_CRED_BROKER_URL:-}" ]; then
   # env, in that order; each fallback is loud-capable but never blocks the operation chain.
   cat > "$HOME/bin/agent-git-token" <<TOKENFETCH
 #!/bin/sh
-curl -fsS --max-time 10 '$GIT_CRED_BROKER_URL' 2>/dev/null \
+# FU-089: prove identity to the broker — the projected SA token (agentstack-worker) rides as a
+# Bearer; the proxy TokenReviews it. Absent token (older pods, docker mode) stays legal until
+# the proxy sets GIT_TOKEN_REQUIRE_AUTH=1.
+SA=\$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)
+curl -fsS --max-time 10 \${SA:+-H "Authorization: Bearer \$SA"} '$GIT_CRED_BROKER_URL' 2>/dev/null \
   || cat '$GIT_TOKEN_FILE' 2>/dev/null \
   || printf %s "\${GH_TOKEN:-}"
 TOKENFETCH

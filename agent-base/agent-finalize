@@ -221,6 +221,13 @@ def classify(log_path, stats):
         return "no-artifact", "no-pr"  # green in-pod, no PR, no detectable infra cause
     if harness_exit != 0:
         return "failed", "nonzero-exit-%d" % harness_exit
+    # Deliberate stop (retro r1 F2, oracle-fleet#66): the worker emitted its structured final
+    # report (the contract JSON parsed — ci_passed/reproduced/root_cause present) and exited 0
+    # with no PR and no failure signature. That is a DECISION, not a death: distinct class so
+    # the strike/chain-walk machinery never re-runs it on the next model — the coordinator
+    # judges the report instead (encodes what #66's coordinator did by hand).
+    if any(k in stats for k in ("ci_passed", "reproduced", "root_cause")):
+        return "blocked-deliberate", "worker-stop-report"
     return "failed", "no-output"  # goose exited 0 but produced no PR and left no detectable error
 
 
@@ -388,6 +395,26 @@ def bookkeeping(stats, log_path):
                 stats["stats_comment_by_pod"] = True
         elif task.startswith("issue-") and slug:
             issue = task[len("issue-"):]
+            if stats.get("exit_status") == "blocked-deliberate":
+                # NOT a strike (a strike means "the run died — walk the model chain"); a
+                # deliberate stop is the worker's judgment call, reported for the coordinator.
+                body = (
+                    "AGENT_REPORT: deliberate stop (model=%s, round=%s, session=%s) — no PR by "
+                    "decision; the structured report is in the run log.%s\n\n"
+                    "<details><summary>last 15 log lines (%s)</summary>\n\n~~~text\n%s~~~\n\n</details>\n"
+                ) % (
+                    os.environ.get("MODEL") or stats.get("model", "?"),
+                    os.environ.get("AGENT_ROUND", "1"), stats.get("pod", "?"),
+                    ("\n\n**Resumable branch pushed:** `%s`" % stats["salvaged_branch"])
+                    if stats.get("salvaged_branch") else "",
+                    stats.get("pod", "?"), _last_lines(log_path),
+                )
+                posted = gh("issue", "comment", issue, "--repo", slug, "--body", body)
+                if posted.returncode == 0:
+                    stats["strike_by_pod"] = True  # suppresses the launcher's fallback strike
+                    print("bookkeeping: deliberate-stop report posted to %s#%s" % (slug, issue),
+                          flush=True)
+                return
             err = stats.get("error_class") or "unknown"
             if stats.get("exit_status") in ("failed", "ci-failed"):
                 err = "unknown"
@@ -588,6 +615,15 @@ def finalize(log_path):
         "key_hash": os.environ.get("OPENROUTER_KEY_HASH", ""),
         "duration_s": max(0, int(time.time()) - int(start_epoch)) if start_epoch else 0,
     }
+    # Retro r1 F6: split queue-wait from active run so ledger wall times stop conflating the two
+    # (#8's "53.7h task" was days of queue). AGENT_DISPATCH_EPOCH is stamped by the launcher at
+    # dispatch; queue_wait = dispatch → pod start, duration_s stays start → finalize.
+    try:
+        dispatch = int(float(os.environ.get("AGENT_DISPATCH_EPOCH", "") or 0))
+    except ValueError:
+        dispatch = 0
+    if dispatch and start_epoch:
+        stats["queue_wait_s"] = max(0, int(start_epoch) - dispatch)
     if stats.get("harness") == "claude":
         # Subscription tier (FU-066): no OpenRouter key in play, marginal cost ~$0 — the honest
         # record is tokens/turns (claude_usage), NOT cost_unknown (that flag means "backfill me
