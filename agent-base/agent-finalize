@@ -132,7 +132,7 @@ def parse_outcome(log_path):
 def classify(log_path, stats):
     """Classify the run into (exit_status, error_class) — the FU-057 enabler.
 
-    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | failed
+    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | failed
     error_class = the dominant machine-detectable cause ('' when clean). Derived from run.log
     patterns + the run's OUTCOME (did it open a PR / pass CI). This is what makes the model-blacklist
     call possible (docs/agents/observability-and-retro.md §B1): the ledger needs to know *why* a run
@@ -414,6 +414,10 @@ def bookkeeping(stats, log_path):
                     stats["strike_by_pod"] = True  # suppresses the launcher's fallback strike
                     print("bookkeeping: deliberate-stop report posted to %s#%s" % (slug, issue),
                           flush=True)
+                else:
+                    print("bookkeeping: deliberate-stop comment FAILED: %s (launcher fallback "
+                          "posts a strike instead)" % posted.stderr.strip()[-200:],
+                          file=sys.stderr)
                 return
             err = stats.get("error_class") or "unknown"
             if stats.get("exit_status") in ("failed", "ci-failed"):
