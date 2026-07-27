@@ -128,14 +128,17 @@ if [ -d "$STACK_CACHE_DIR" ]; then
      && cmp -s devbox.lock "$STACK_CACHE_DIR/devbox.lock"; then
     XDG_DEST="${XDG_CACHE_HOME:-$HOME/.cache}"
     mkdir -p "$XDG_DEST"
-    # chmod after copy: cp -r preserves the read-only modes of the ImageVolume files, and
-    # devbox/nix must WRITE these caches (caught in the pre-ship simulation: devbox died mid
-    # `mv` into a read-only seeded ~/.cache/devbox/bin).
-    if cp -r "$STACK_CACHE_DIR/xdg/." "$XDG_DEST/" 2>/dev/null \
-       && chmod -R u+w "$XDG_DEST" 2>/dev/null; then
+    # cp -rf, not -r: ~/.cache already holds the HARNESS's own nix caches from the image build,
+    # including READ-ONLY git-object files (0444) the stack seed overlaps — plain cp cannot
+    # overwrite those and the whole seed failed on the first live ride (2026-07-27; the jail
+    # simulation copied into an EMPTY home and never saw it). -f unlinks-and-retries. chmod is
+    # DECOUPLED so a partial copy still comes out writable, and stderr stays visible.
+    if cp -rf "$STACK_CACHE_DIR/xdg/." "$XDG_DEST/"; then
+      chmod -R u+w "$XDG_DEST" 2>/dev/null || true
       echo "→ stack cache: eval-cache seeded (lock match)"
     else
-      echo "WARN: stack cache eval-seed copy failed — continuing with cold eval cache" >&2
+      chmod -R u+w "$XDG_DEST" 2>/dev/null || true
+      echo "WARN: stack cache eval-seed copy failed (see cp errors above) — continuing with cold eval cache" >&2
     fi
   else
     echo "WARN: stack cache mounted but its devbox.lock differs from the repo's — eval seed skipped (stale artifact or old base ref; next lock-push rebuilds it)" >&2
