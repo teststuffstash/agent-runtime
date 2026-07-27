@@ -112,6 +112,42 @@ if [ -n "$NIX_CACHE_URL" ]; then
 extra-trusted-substituters = ${NIX_CACHE_URL}"
 fi
 
+# Stack devbox-cache (homelab FU-096): the launcher mounts the stack's CI-published cache artifact
+# read-only at /stack-cache (k8s ImageVolume; built by homelab devbox-cache.reusable.yml). Two
+# halves: (a) EVAL-CACHE SEED — copy /stack-cache/xdg/{nix,devbox} into ~/.cache. Nix evaluation,
+# not fetching, was measured to be the bring-up tax (homelab FU-015: 94s `devbox install` on a
+# fully-warm store; 2026-07-27 repro: 55s cold-cache vs 4s seeded), and the cache is portable
+# across project path AND HOME by plain copy (measured same day). Guarded by EXACT devbox.lock
+# match — a stale :latest artifact or an old BASE_REF skips the seed loudly and the run degrades
+# to cold eval, never a wrong toolchain. (b) LOCAL SUBSTITUTER — /stack-cache/store is a file://
+# nix binary cache of the project closure with upstream signatures intact (`nix copy` preserves
+# narinfo Sig), so no trusted-key changes; a miss falls through to the LAN mirror above.
+STACK_CACHE_DIR="${STACK_CACHE_DIR:-/stack-cache}"
+if [ -d "$STACK_CACHE_DIR" ]; then
+  if [ -f devbox.lock ] && [ -f "$STACK_CACHE_DIR/devbox.lock" ] \
+     && cmp -s devbox.lock "$STACK_CACHE_DIR/devbox.lock"; then
+    XDG_DEST="${XDG_CACHE_HOME:-$HOME/.cache}"
+    mkdir -p "$XDG_DEST"
+    # chmod after copy: cp -r preserves the read-only modes of the ImageVolume files, and
+    # devbox/nix must WRITE these caches (caught in the pre-ship simulation: devbox died mid
+    # `mv` into a read-only seeded ~/.cache/devbox/bin).
+    if cp -r "$STACK_CACHE_DIR/xdg/." "$XDG_DEST/" 2>/dev/null \
+       && chmod -R u+w "$XDG_DEST" 2>/dev/null; then
+      echo "→ stack cache: eval-cache seeded (lock match)"
+    else
+      echo "WARN: stack cache eval-seed copy failed — continuing with cold eval cache" >&2
+    fi
+  else
+    echo "WARN: stack cache mounted but its devbox.lock differs from the repo's — eval seed skipped (stale artifact or old base ref; next lock-push rebuilds it)" >&2
+  fi
+  if [ -f "$STACK_CACHE_DIR/store/nix-cache-info" ]; then
+    export NIX_CONFIG="${NIX_CONFIG:+$NIX_CONFIG
+}extra-substituters = file://$STACK_CACHE_DIR/store?priority=5
+extra-trusted-substituters = file://$STACK_CACHE_DIR/store"
+    echo "→ stack cache: local substituter file://$STACK_CACHE_DIR/store"
+  fi
+fi
+
 # Materialize the PROJECT toolchain from its own devbox.json. Cold the very first time across all
 # pods (populates the cache above); near-instant for the same closure afterwards.
 if [ -f devbox.json ]; then
