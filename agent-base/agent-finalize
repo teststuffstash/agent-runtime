@@ -370,14 +370,22 @@ def bookkeeping(stats, log_path):
         slug = repo_url[len("https://github.com/"):].removesuffix(".git")
 
     try:
+        # AGENT_ARM_PR=0 (launcher --no-arm): roles whose PR is deliberately HUMAN-GATED —
+        # arm-at-open (homelab MP-T01) is the worker default, but an un-armed PR is the
+        # researcher role's gate (homelab FU-105; found live 2026-07-27: finalize armed the
+        # first spec PR right past the recipe's "do not arm").
         if pr_url:
-            armed = gh("pr", "merge", pr_url, "--auto", "--squash")
-            if armed.returncode == 0:
-                stats["armed_by_pod"] = True
-                print("bookkeeping: auto-merge armed on " + pr_url, flush=True)
+            if os.environ.get("AGENT_ARM_PR", "1") == "0":
+                stats["armed_by_pod"] = False
+                print("bookkeeping: arming SKIPPED (AGENT_ARM_PR=0 — human-gated PR)", flush=True)
             else:
-                print("bookkeeping: arm FAILED: %s (launcher/reflex re-arms)"
-                      % armed.stderr.strip()[-200:], file=sys.stderr)
+                armed = gh("pr", "merge", pr_url, "--auto", "--squash")
+                if armed.returncode == 0:
+                    stats["armed_by_pod"] = True
+                    print("bookkeeping: auto-merge armed on " + pr_url, flush=True)
+                else:
+                    print("bookkeeping: arm FAILED: %s (launcher/reflex re-arms)"
+                          % armed.stderr.strip()[-200:], file=sys.stderr)
             body = (
                 "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
                 "| metric | value |\n|---|---|\n"
