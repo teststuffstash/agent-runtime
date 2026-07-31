@@ -14,6 +14,16 @@ launcher's post-run block silently doesn't happen on that path — three strikes
 posted by hand before this moved in-pod. The launcher keeps a FALLBACK copy of each step, skipped when
 the stats line carries the corresponding `*_by_pod` flag. Requires issues:write on the worker token
 (git-token.yaml files). Everything is best-effort: a stats/bookkeeping failure must never fail the run.
+
+INTERPRETER (who owns the python this runs on): agent-base's OWN `python@3.11` — the
+`/opt/agent/.devbox` profile baked into this image (agent-base/devbox.json), which sits on the
+container PATH. This is deliberately NOT the cloned project's python: finalize runs AFTER the harness,
+OUTSIDE any `devbox run`, so a stack that pins a different version in ITS devbox.json (e.g.
+python@3.14) runs only its own code on 3.14 — this script is unaffected and always executes on 3.11.
+Kept strictly to the stdlib (no third-party imports) so it tolerates a bump, but the version is a
+PLATFORM choice owned HERE (bump it in agent-base/devbox.{json,lock}, never a project's), decoupled
+from every stack. Corollary: a python-version bug that "breaks in one project but not another" can
+only be in project code (its own `devbox run` python), never in this file.
 """
 import json, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request
 

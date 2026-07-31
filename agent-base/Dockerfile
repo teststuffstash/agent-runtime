@@ -23,12 +23,20 @@ USER root
 RUN mkdir -p /opt/agent /work && chown -R devbox:devbox /opt/agent /work
 
 # Materialize the harness layer from the committed lock → deterministic goose/opencode versions.
+# This layer is TWO things, not just a cache-warm: (1) the PLATFORM interpreter/toolchain that the
+# base scripts run on — `agent-finalize` runs on THIS `python@3.11`, `agent-git-token`/`gh` on THIS
+# gh, etc. — outside any project `devbox run`, so it's decoupled from whatever a stack pins; and
+# (2) a warm /nix store, so a project's runtime `devbox install` is cache-hits for the shared
+# closure (a project pinning a DIFFERENT python just fetches that delta; it never changes what the
+# base scripts use). Bump python here = a platform decision; a stack's python lives in ITS devbox.json.
 WORKDIR /opt/agent
 COPY --chown=devbox:devbox agent-base/devbox.json agent-base/devbox.lock ./
 USER devbox
 RUN devbox install
 
-# Put the harness profile on PATH for every shell/exec (interactive + headless).
+# Put the harness profile on PATH for every shell/exec (interactive + headless). This is why the
+# base scripts always resolve THIS python/gh, never the cloned project's — a project's profile is
+# only on PATH inside `devbox run`.
 ENV PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH
 
 USER root
