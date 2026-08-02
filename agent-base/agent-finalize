@@ -54,6 +54,31 @@ def or_usage():
         return None
 
 
+def router_report(stats, exit_status, error_class):
+    """homelab FU-095 P1: POST the run report to the egress proxy's /report (ADR-096 M5) from
+    IN-POD — the launcher's finalizer twin. AGENT_REPORT_URL + AGENT_STACK are launcher-injected
+    (stack resolution is launcher-owned; the pod has no homelab checkout). Best-effort: absent
+    env or unreachable proxy skips loudly, never fails the run."""
+    url = os.environ.get("AGENT_REPORT_URL") or ""
+    if not url:
+        return
+    payload = {
+        "session": os.environ.get("HOSTNAME") or stats.get("pod") or "",
+        "task": os.environ.get("AGENT_TASK") or "",
+        "stack": os.environ.get("AGENT_STACK") or "",
+        "role": "worker",
+        "round": int(os.environ.get("AGENT_ROUND") or 1),
+        "model": os.environ.get("MODEL") or os.environ.get("GOOSE_MODEL") or stats.get("model") or "",
+        "cost_usd": float(stats.get("cost_usd") or 0.0),
+        "error_class": error_class or "",
+        "outcome": "pr" if stats.get("pr_url") else (exit_status or "no-pr"),
+    }
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        print("router-report: posted (%s) -> %s" % (url, r.status), flush=True)
+
+
 def _read_float(path):
     try:
         return float(open(path).read().strip())
@@ -716,6 +741,13 @@ def finalize(log_path):
     except Exception as e:
         print("bookkeeping: non-fatal error: %s" % e, file=sys.stderr)
     print("AGENT_RUN_STATS " + json.dumps(stats, separators=(",", ":")), flush=True)
+    try:  # homelab FU-095 P1: the launcher's POST /report twin — coordinator-path rides have no
+        # attending launcher, so without this their outcomes never reach the router's shadow
+        # store. Idempotent per session server-side (INSERT OR REPLACE) — a double post from a
+        # launcher-attended run is harmless by design.
+        router_report(stats, exit_status, error_class)
+    except Exception as e:
+        print("router-report: non-fatal error: %s" % e, file=sys.stderr)
     try:  # FU-057 §B1: worker $ + outcome → Prometheus (goose has no OTLP rail)
         push_metrics(stats, exit_status, error_class)
     except Exception as e:
