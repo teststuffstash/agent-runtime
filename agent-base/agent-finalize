@@ -241,16 +241,45 @@ def classify(log_path, stats):
     return "failed", "no-output"  # goose exited 0 but produced no PR and left no detectable error
 
 
+def _broker_git_token():
+    """homelab FU-123: fetch the live worker token straight from the proxy's /git-token endpoint.
+    FU-089 deleted the standing in-ns git Secret, so the mount below is empty on broker-era rides —
+    without this fetch the whole gh section ran tokenless (5/5 un-armed PRs, #96/PR#107 the
+    confirming case) while git pushes kept working through the credential helper. Mirrors the
+    entrypoint's agent-git-token: the projected SA token rides as a Bearer (TokenReview'd
+    broker-side; absent SA stays legal until GIT_TOKEN_REQUIRE_AUTH=1)."""
+    url = os.environ.get("GIT_CRED_BROKER_URL", "")
+    if not url:
+        return ""
+    headers = {}
+    try:
+        sa = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+        if sa:
+            headers["Authorization"] = "Bearer " + sa
+    except Exception:
+        pass
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as r:
+            return r.read().decode().strip()
+    except Exception as e:
+        print("finalize: broker git-token fetch failed: %s (falling back to mount/env)" % e,
+              file=sys.stderr)
+        return ""
+
+
 def _fresh_gh_env():
-    """Env for git/gh subprocesses with the FRESHEST git token. The mounted Secret file (rotated by
-    ESO every refreshInterval) beats the env var, which is frozen at pod start — a >60-min run's env
+    """Env for git/gh subprocesses with the FRESHEST git token: broker → mounted Secret file →
+    inherited env, the entrypoint's agent-git-token order. The file (rotated by ESO every
+    refreshInterval) beats the env var, which is frozen at pod start — a >60-min run's env
     token is dead by the time finalize pushes (homelab FU-064b)."""
     env = dict(os.environ)
-    path = os.environ.get("GIT_TOKEN_FILE", "/secrets/git/token")
-    try:
-        tok = open(path).read().strip()
-    except Exception:
-        tok = ""
+    tok = _broker_git_token()
+    if not tok:
+        path = os.environ.get("GIT_TOKEN_FILE", "/secrets/git/token")
+        try:
+            tok = open(path).read().strip()
+        except Exception:
+            tok = ""
     if tok:
         env["GH_TOKEN"] = tok
     return env
