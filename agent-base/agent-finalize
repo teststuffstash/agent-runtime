@@ -213,6 +213,17 @@ def classify(log_path, stats):
     timeout = n(r"context deadline exceeded|operation timed out|request timed out|"
                 r"timeout of \d+\s*ms exceeded")
 
+    # The watchdog's verdict, when it killed this run (#13). It writes a marker BEFORE the SIGTERM
+    # because the signal alone is indistinguishable from any other kill — the run would land as
+    # nonzero-exit-143, which says "someone stopped it" and nothing about why. Read the file, not
+    # the exit code. Absent marker = the watchdog didn't fire; this stays out of the way entirely.
+    watchdog = ""
+    try:
+        with open(os.environ.get("AGENT_WATCHDOG_MARKER", "/tmp/agent-watchdog-class")) as fh:
+            watchdog = fh.read().strip()[:40]
+    except Exception:
+        watchdog = ""
+
     ci_passed = stats.get("ci_passed")
     # SUCCESS requires the ARTIFACT — a PR. ci_passed alone is NOT clean: a run whose work went
     # green in-pod but never reached GitHub (dead git token, unpushed branch) used to classify
@@ -228,6 +239,11 @@ def classify(log_path, stats):
         fail = ("no-artifact", "token-expiry")  # green work, dead git token at push/PR time
     elif auth >= 5:
         fail = ("auth-storm", "http-403-storm" if forbidden >= auth - forbidden else "http-401-storm")
+    elif watchdog == "repetition-loop":
+        # Below budget/auth on purpose: kimi-k3's repetition WAS its post-403 retry storm, and
+        # "budget-exhausted" is the cause worth striking on — the repetition is that death's
+        # symptom. When no key/billing signature is present, this is the real class.
+        fail = ("harness-death", "repetition-loop")
     elif truncation:
         fail = ("harness-death", "goose-32602-truncation")
     elif panic:

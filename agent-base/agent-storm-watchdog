@@ -16,11 +16,62 @@
 #   producing failures and nothing else; a passing test suite scrolls its burst out of the window
 #   or stops adding matches). Patterns mirror agent-finalize's classify() — keep them in step.
 #
+# Repetition rule (#13 — a SECOND storm shape, same kill path): the model degenerates into emitting
+# one line over and over. Every request is a 200, nothing truncates, no auth error fires — the run
+# just burns budget and wall-clock producing the same sentence. Measured on the circles FU-126
+# fan-out (2026-08-03): deepseek-0731 repeated "Now let me commit and push the skeleton early."
+# 1,635× (53% of that ride's wall time), and kimi-k3's post-403 retry storm repeated its
+# circuit-open notice 171× in 18s — so this ONE rule catches both the degenerate-text class and the
+# terminal-error retry class. Separation is not subtle: worst 200-line window, blank lines excluded,
+# share held by a single line was 100% on both sick rides vs 8.1% (mimo) and 0% (opus) on healthy
+# ones — hence a 50% default with enormous margin.
+#
+#   ⚠ Blank lines MUST be excluded: 3,722 of deepseek's 8,910 lines were empty, so a naive
+#     most-frequent-line check reports ~100% on a perfectly healthy log.
+#
+# Reproduce any decision this makes against a saved log (they are uploaded per ride to
+# s3://agent-transcripts/<stack>/<task>/<session>/run.log):
+#
+#   agent-storm-watchdog --check /path/to/run.log      # prints the worst window share, exits 0
+#
 #   Env: STORM_WATCHDOG=off to disable · STORM_LOG=/tmp/run.log · STORM_THRESHOLD=10
 #        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
+#        STORM_REPEAT_PCT=50 (0 disables) · STORM_REPEAT_WINDOW=200 · STORM_REPEAT_MIN=40
+#        STORM_MARKER=/tmp/agent-watchdog-class (agent-finalize reads it for the error_class)
 set -u
 
 [ "${STORM_WATCHDOG:-on}" = "off" ] && exit 0
+
+REPEAT_PCT="${STORM_REPEAT_PCT:-50}"
+REPEAT_WINDOW="${STORM_REPEAT_WINDOW:-200}"
+REPEAT_MIN="${STORM_REPEAT_MIN:-40}"
+MARKER="${STORM_MARKER:-/tmp/agent-watchdog-class}"
+
+# Share (whole %) of the last $REPEAT_WINDOW NON-BLANK lines held by the most frequent one, after
+# trimming surrounding whitespace. Prints 0 when the window is too small to judge — a run that has
+# barely started must never be killed on three identical banner lines.
+repeat_share() { # <logfile>
+  tail -n "$REPEAT_WINDOW" "$1" 2>/dev/null | sed 's/[[:space:]]*$//; s/^[[:space:]]*//' \
+    | awk 'NF' | sort | uniq -c | sort -rn \
+    | awk -v min="$REPEAT_MIN" 'NR==1{top=$1} {n+=$1} END{if (n<min || n==0) print 0; else printf "%d\n", top*100/n}'
+}
+
+# Offline reproduction: the live loop only ever sees the TAIL, so replay a saved log window by
+# window and report the worst one — that is the number a post-mortem argues about.
+if [ "${1:-}" = "--check" ]; then
+  [ -f "${2:-}" ] || { echo "usage: agent-storm-watchdog --check <run.log>" >&2; exit 2; }
+  _total="$(wc -l < "$2")"; _worst=0; _at=0; _step=$((REPEAT_WINDOW / 2)); _i=0
+  while [ "$_i" -lt "$_total" ]; do
+    _s="$(sed -n "$((_i + 1)),$((_i + REPEAT_WINDOW))p" "$2" | sed 's/[[:space:]]*$//; s/^[[:space:]]*//' \
+      | awk 'NF' | sort | uniq -c | sort -rn \
+      | awk -v min="$REPEAT_MIN" 'NR==1{top=$1} {n+=$1} END{if (n<min || n==0) print 0; else printf "%d\n", top*100/n}')"
+    [ "$_s" -gt "$_worst" ] && { _worst="$_s"; _at="$_i"; }
+    _i=$((_i + _step))
+  done
+  echo "worst window: ${_worst}% at line ${_at} (threshold ${REPEAT_PCT}%, window ${REPEAT_WINDOW}, min ${REPEAT_MIN} non-blank)"
+  [ "$_worst" -ge "$REPEAT_PCT" ] && echo "→ WOULD KILL" || echo "→ would not kill"
+  exit 0
+fi
 
 LOG="${STORM_LOG:-/tmp/run.log}"
 THRESHOLD="${STORM_THRESHOLD:-10}"
@@ -30,29 +81,51 @@ GRACE_S="${STORM_GRACE_S:-15}"
 
 PAT='authentication failed|401 unauthorized|403 forbidden|invalid api key|no auth credentials|invalid_api_key|insufficient (credit|quota|fund)|require[sd]? more credit|payment required|402 payment|quota exceeded|budget exceeded|out of credit'
 
+# SIGTERM the HARNESS only — never the shell pipeline, so tee/agent-finalize still run.
+# claude harness (FU-066) storms the same way on a dead ref/proxy. nixpkgs wraps the
+# bun-compiled binary (makeBinaryWrapper), so the kernel comm name is `.claude-wrapped`,
+# NOT `claude` — match both (reviewer finding, agent-runtime#14).
+terminate_harness() { # <why>
+  echo "AGENT_STORM_WATCHDOG: $1 — terminating the harness"
+  pkill -TERM -x goose 2>/dev/null
+  pkill -TERM -x opencode 2>/dev/null
+  pkill -TERM -x claude 2>/dev/null
+  pkill -TERM -x .claude-wrapped 2>/dev/null
+  sleep "$GRACE_S"
+  pkill -KILL -x goose 2>/dev/null
+  pkill -KILL -x opencode 2>/dev/null
+  pkill -KILL -x claude 2>/dev/null
+  pkill -KILL -x .claude-wrapped 2>/dev/null
+}
+
 prev_hot=0
 prev_total=0
+prev_rep_hot=0
+prev_lines=0
 while :; do
   sleep "$POLL_S"
   [ -f "$LOG" ] || continue
   total="$(grep -ciE "$PAT" "$LOG" 2>/dev/null || true)"; total="${total:-0}"
   dens="$(tail -n "$WINDOW" "$LOG" 2>/dev/null | grep -ciE "$PAT" || true)"; dens="${dens:-0}"
   if [ "$dens" -ge "$THRESHOLD" ] && [ "$total" -gt "$prev_total" ] && [ "$prev_hot" = 1 ]; then
-    echo "AGENT_STORM_WATCHDOG: ${dens} auth/credit failures in the last ${WINDOW} log lines" \
-         "(${total} total, still growing) — terminating the harness (#8, homelab FU-021)"
-    # claude harness (FU-066) storms the same way on a dead ref/proxy. nixpkgs wraps the
-    # bun-compiled binary (makeBinaryWrapper), so the kernel comm name is `.claude-wrapped`,
-    # NOT `claude` — match both (reviewer finding, agent-runtime#14).
-    pkill -TERM -x goose 2>/dev/null
-    pkill -TERM -x opencode 2>/dev/null
-    pkill -TERM -x claude 2>/dev/null
-    pkill -TERM -x .claude-wrapped 2>/dev/null
-    sleep "$GRACE_S"
-    pkill -KILL -x goose 2>/dev/null
-    pkill -KILL -x opencode 2>/dev/null
-    pkill -KILL -x claude 2>/dev/null
-    pkill -KILL -x .claude-wrapped 2>/dev/null
+    terminate_harness "${dens} auth/credit failures in the last ${WINDOW} log lines (${total} total, still growing) (#8, homelab FU-021)"
     exit 0
+  fi
+  # Repetition rule (#13). Same two-poll + still-growing shape as above: one poll of high share is
+  # a burst (a loop printing a banner, a test suite spamming one assertion); a second poll with new
+  # lines on top means the run is doing nothing else. The marker is written BEFORE the kill so
+  # agent-finalize's classifier always finds it — it reads the file, not the exit code, because
+  # SIGTERM alone only says nonzero-exit-143, which under-describes this death.
+  if [ "$REPEAT_PCT" -gt 0 ]; then
+    share="$(repeat_share "$LOG")"; share="${share:-0}"
+    lines="$(wc -l < "$LOG" 2>/dev/null || echo 0)"; lines="${lines:-0}"
+    if [ "$share" -ge "$REPEAT_PCT" ] && [ "$prev_rep_hot" = 1 ] && [ "$lines" -gt "$prev_lines" ]; then
+      echo "repetition-loop" > "$MARKER" 2>/dev/null || true
+      terminate_harness "one line holds ${share}% of the last ${REPEAT_WINDOW} non-blank log lines on two consecutive polls, log still growing — degenerate repetition (#13)"
+      exit 0
+    fi
+    [ "$share" -ge "$REPEAT_PCT" ] && prev_rep_hot=1 || prev_rep_hot=0
+    prev_lines="$lines"
   fi
   [ "$dens" -ge "$THRESHOLD" ] && prev_hot=1 || prev_hot=0
   prev_total="$total"
