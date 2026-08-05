@@ -104,11 +104,19 @@ chmod +x .git/hooks/prepare-commit-msg
 # Nix pull-through cache (homelab argocd/resources/nix-cache): prefer the in-cluster mirror of
 # cache.nixos.org so the project closure is fetched over the WAN once, then served LAN-speed on every
 # later run. Bodies pass through unchanged, so upstream signatures stay valid — no extra trusted key.
-# An unreachable cache degrades gracefully (nix falls back to the upstream substituter). Override with
-# NIX_CACHE_URL, or set it empty to disable.
+# Override with NIX_CACHE_URL, or set it empty to disable.
+#
+# homelab FU-130: this used `extra-substituters`, which ADDS the mirror and leaves cache.nixos.org
+# in the list — so every LAN miss also went to the WAN (28 cache.nixos.org lookups in one ride's DNS
+# harvest). Harmless in monitor mode, a HANG once the egress policy enforces: nix waits on a
+# blackholed connect rather than failing. `substituters` REPLACES the list, which is the honest
+# posture for a sandboxed ride: the pull-through mirror is the only way out, and it fetches upstream
+# on the ride's behalf. Signatures still come from cache.nixos.org (bodies pass through
+# byte-for-byte), so no trusted-key change. If the mirror is down the closure genuinely is
+# unavailable — that surfaces as a failure instead of silently escaping the sandbox.
 NIX_CACHE_URL="${NIX_CACHE_URL:-http://nixcache.nix-cache.svc.cluster.local}"
 if [ -n "$NIX_CACHE_URL" ]; then
-  export NIX_CONFIG="extra-substituters = ${NIX_CACHE_URL}?priority=10
+  export NIX_CONFIG="substituters = ${NIX_CACHE_URL}?priority=10
 extra-trusted-substituters = ${NIX_CACHE_URL}"
 fi
 
