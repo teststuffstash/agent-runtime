@@ -1,0 +1,33 @@
+# Path ownership for agent-runtime — the gate that lets a fixer work here without being able to
+# edit its own governor. Same principle as homelab's CODEOWNERS and circles': OWN WHAT GOVERNS THE
+# AGENT, NOT WHAT THE AGENT OPERATES ON.
+#
+# This repo is unusual: it IS the harness. `agent-base/` builds the image every ride runs inside,
+# so a bad merge here does not break one project — it breaks the fleet's ability to fix itself.
+# The fixer's scope is the harness SOURCES plus tests/; the things that decide what ships are owned.
+#
+# GitHub semantics: LAST matching pattern wins, and a pattern with NO owner REMOVES ownership.
+
+# ── The build+publish path. `.github/workflows/` is governor-class HERE (unlike a stack repo,
+# where a deploy workflow is ordinary product plumbing): these workflows push the image the whole
+# fleet pulls, and open the deploy-pin PR into homelab.
+/.github/                       @RasmusSoot
+
+# ── The image definition + toolchain. A dep or base-image change ships to every ride at once, and
+# the lockfiles are what make a rebuild reproducible.
+/agent-base/Dockerfile          @RasmusSoot
+/agent-base/devbox.json         @RasmusSoot
+/agent-base/devbox.lock         @RasmusSoot
+/devbox.json                    @RasmusSoot
+
+# ── The recipes are the agent's own instructions — an agent able to edit them is not gated at all.
+/.agents/                       @RasmusSoot
+
+# ── The ownership file owns itself, or the first thing an agent can propose is its own ungating
+# (homelab and oracle-fleet carry the same line for the same reason).
+/CODEOWNERS                     @RasmusSoot
+
+# Deliberately UNOWNED — this is the fixer's lane:
+#   agent-base/agent-finalize, agent-base/entrypoint.sh, agent-base/agent-storm-watchdog
+#   tests/, scripts/ci.sh, docs/, README.md
+# CI (the unit tests) is the gate there, plus the reviewer's approval.

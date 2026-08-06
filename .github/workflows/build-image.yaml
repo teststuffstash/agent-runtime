@@ -90,6 +90,16 @@ jobs:
           git push -q -f origin deploy/agent-base
           PR=$(gh pr list --repo "${{ github.repository_owner }}/homelab" --head deploy/agent-base --state open --json number --jq '.[0].number // empty')
           [ -n "$PR" ] || PR=$(gh pr create --repo "${{ github.repository_owner }}/homelab" --base master --head deploy/agent-base \
-            --title "deploy: agent-base ${TAG}" --body "First-party agent-base image bump (CI-opened, not Renovate). Agent worker pods pick it up on next spawn." | grep -oE '[0-9]+$')
+            --title "deploy: agent-base ${TAG}" \
+            --body "First-party agent-base image bump (CI-opened, not Renovate). Agent worker pods pick it up on next spawn." | grep -oE '[0-9]+$')
+          # The MECHANICAL lane (docs/dependency-upgrades.md 2): `automerge` makes homelab's review
+          # reflex SKIP the PR (no LLM burned on a one-line CalVer bump) and, with `dependencies` +
+          # a Bot author, satisfies renovate-approve.reusable.yml's gate so the required approval is
+          # posted by the reviewer App. CI stays the real gate. Applied on the REUSED-PR path too:
+          # deploy/agent-base is long-lived and force-pushed, so `gh pr create` often does not run —
+          # homelab #75/#79/#84/#95/#102/#105/#109 all sat unlabelled and waited on a human.
+          gh pr edit "$PR" --repo "${{ github.repository_owner }}/homelab" \
+            --add-label automerge --add-label dependencies \
+            || echo "::warning::could not label homelab#$PR — it will wait on a human approval"
           gh pr merge "$PR" --repo "${{ github.repository_owner }}/homelab" --auto --squash || echo "::warning::could not arm auto-merge on homelab#$PR"
           echo "→ homelab images.env PR #$PR → ${TAG}"

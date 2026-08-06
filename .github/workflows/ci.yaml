@@ -26,3 +26,18 @@ jobs:
           file: agent-base/Dockerfile
           platforms: linux/amd64
           push: false
+
+  # The image building says nothing about whether the harness LOGIC is right — agent-finalize
+  # decides whether a model is struck and whether a round is re-dispatched, and two of its bugs
+  # shipped green under a build-only gate. Unit tests, hermetic: no network, no cluster, no gh.
+  unit:
+    runs-on: homelab-ephemeral
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jetify-com/devbox-install-action@v0.13.0
+        with:
+          enable-cache: "true"
+      - name: devbox run ci
+        run: devbox run ci
