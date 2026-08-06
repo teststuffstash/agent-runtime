@@ -456,6 +456,45 @@ def bookkeeping(stats, log_path):
                 else:
                     print("bookkeeping: arm FAILED: %s (launcher/reflex re-arms)"
                           % armed.stderr.strip()[-200:], file=sys.stderr)
+            # ── GUARANTEE THE ISSUE LINK (#32) ────────────────────────────────────────────────
+            # The coordinator scan links a PR to its issue by TEXT — `#<n>` anywhere in the body —
+            # not by GitHub's closing references, because a PR based on a non-default branch has
+            # none. An in-progress issue with no open PR body matching `#<n>` reads as "worker
+            # terminal, no PR" and gets RE-DISPATCHED onto finished work.
+            # Recipes are the wrong place for this: fix.yaml asks for it, build.yaml does not (in
+            # both repos that have one), and a rule a model can forget is advice, not mechanism.
+            # Cost of forgetting it live (circles#30/#36, 2026-08-06): a duplicate ride onto merged
+            # work, plus a goal child that could never close — homelab FU-143's soak failed on
+            # exactly this, and the scan now has to HOLD such issues because it cannot tell
+            # merged-but-unlinked from abandoned.
+            # ⚖ `Implements`, never `Fixes`: on a `goal/**` base a closing keyword is inert, and on
+            # master it would make the PR close an issue the goal lane still owns. This line exists
+            # to satisfy the scan's regex, NOT to change what merging does.
+            # ⚖ Match, do not duplicate; prepend, do not rewrite; never fatal.
+            if task.startswith("issue-") and slug:
+                _issue = task[len("issue-"):]
+                try:
+                    _cur = gh("pr", "view", pr_url, "--json", "body", "--jq", ".body")
+                    if _cur.returncode != 0:
+                        print("bookkeeping: issue-link read FAILED: %s (scan may re-dispatch %s#%s)"
+                              % (_cur.stderr.strip()[-160:], slug, _issue), file=sys.stderr)
+                    elif re.search(r"#%s\b" % re.escape(_issue), _cur.stdout):
+                        print("bookkeeping: issue link already present (#%s) — left alone" % _issue,
+                              flush=True)
+                    else:
+                        _new = "Implements #%s\n\n%s" % (_issue, _cur.stdout)
+                        _ed = gh("pr", "edit", pr_url, "--body", _new)
+                        if _ed.returncode == 0:
+                            print("bookkeeping: issue link ADDED (Implements #%s) — the PR body did "
+                                  "not name its issue" % _issue, flush=True)
+                            stats["issue_link_added_by_pod"] = True
+                        else:
+                            print("bookkeeping: issue-link edit FAILED: %s (scan may re-dispatch "
+                                  "%s#%s)" % (_ed.stderr.strip()[-160:], slug, _issue),
+                                  file=sys.stderr)
+                except Exception as exc:  # never turn a good ride into a failed one
+                    print("bookkeeping: issue-link step errored: %r (non-fatal)" % exc,
+                          file=sys.stderr)
             body = (
                 "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
                 "| metric | value |\n|---|---|\n"
