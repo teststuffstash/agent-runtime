@@ -1,0 +1,10 @@
+# Test configuration only. The harness itself is stdlib-only and ships as EXTENSIONLESS executables
+# copied onto PATH in the image (agent-base/agent-finalize, agent-storm-watchdog) — it is deliberately
+# not a package, and this file must not turn it into one. pytest is supplied by devbox, not by uv or
+# a venv, so there is no lockfile to drift.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+# An xfail that starts PASSING fails the run, so a fixed bug cannot quietly stay marked broken —
+# tests/test_classify.py pins agent-runtime#36 that way and expects to be un-pinned by its fix.
+xfail_strict = true

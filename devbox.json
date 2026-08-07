@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "python313Packages.pytest@latest",
+    "gh@latest",
+    "gitleaks@latest"
+  ],
+  "shell": {
+    "init_hook": [],
+    "scripts": {
+      "ci": [
+        "bash scripts/ci.sh"
+      ],
+      "test": [
+        "pytest tests/ -q"
+      ],
+      "scan-secrets": [
+        "gitleaks detect --source . --no-banner --verbose"
+      ]
+    }
+  }
+}

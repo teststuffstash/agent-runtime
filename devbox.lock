@@ -1,0 +1,157 @@
+{
+  "lockfile_version": "1",
+  "packages": {
+    "gh@latest": {
+      "last_modified": "2026-08-01T16:34:20Z",
+      "resolved": "github:NixOS/nixpkgs/a5cbcfe954791221bfffe2307f7d1a1bf61a871e#gh",
+      "source": "devbox-search",
+      "version": "2.97.0",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/9q6i0m1x1wx24vknbs3iglvnr5aw1hxb-gh-2.97.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/9q6i0m1x1wx24vknbs3iglvnr5aw1hxb-gh-2.97.0"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/8zf6nxnc574nlipbhq4z46ij22hqd9ac-gh-2.97.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/8zf6nxnc574nlipbhq4z46ij22hqd9ac-gh-2.97.0"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/7ayrbzjnm88xn12lfv99c1sqprlc2bwr-gh-2.97.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/7ayrbzjnm88xn12lfv99c1sqprlc2bwr-gh-2.97.0"
+        }
+      }
+    },
+    "github:NixOS/nixpkgs/nixpkgs-unstable": {
+      "last_modified": "2026-08-03T09:05:39Z",
+      "resolved": "github:NixOS/nixpkgs/104240a772428cc2e20d8fd86c9ddbb886bbaff2?lastModified=1785747939&narHash=sha256-D740uKsMbgsfK2oaDenJLLPIZfq7W0%2Fg4KN%2FFls8eKs%3D"
+    },
+    "gitleaks@latest": {
+      "last_modified": "2026-08-01T16:34:20Z",
+      "resolved": "github:NixOS/nixpkgs/a5cbcfe954791221bfffe2307f7d1a1bf61a871e#gitleaks",
+      "source": "devbox-search",
+      "version": "8.30.1",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/cd1mdfxh9fkan85xfvfszp09z0pnrw92-gitleaks-8.30.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/cd1mdfxh9fkan85xfvfszp09z0pnrw92-gitleaks-8.30.1"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/5ag1lvwd0faajnd1isazrjlmbys928x9-gitleaks-8.30.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/5ag1lvwd0faajnd1isazrjlmbys928x9-gitleaks-8.30.1"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/v5x4dkl13y4nxhcaq4xmrwkidy44gv9p-gitleaks-8.30.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/v5x4dkl13y4nxhcaq4xmrwkidy44gv9p-gitleaks-8.30.1"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/fqjnjyp0l2ifa6a0pkc6v9v9l8ygwhkn-gitleaks-8.30.1",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/fqjnjyp0l2ifa6a0pkc6v9v9l8ygwhkn-gitleaks-8.30.1"
+        }
+      }
+    },
+    "python313Packages.pytest@latest": {
+      "last_modified": "2026-08-03T09:05:39Z",
+      "resolved": "github:NixOS/nixpkgs/104240a772428cc2e20d8fd86c9ddbb886bbaff2#python313Packages.pytest",
+      "source": "devbox-search",
+      "version": "9.1.1",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/p54qjhcsv7hl5hga1lg72nw802w7y2y3-python3.13-pytest-9.1.1",
+              "default": true
+            },
+            {
+              "name": "dist",
+              "path": "/nix/store/849mc3fsrz8dm9rj05xkr8r7vp231b2v-python3.13-pytest-9.1.1-dist"
+            },
+            {
+              "name": "testout",
+              "path": "/nix/store/9prxs3k9qjlcbpaybfby4s08yb2nlb38-python3.13-pytest-9.1.1-testout"
+            }
+          ],
+          "store_path": "/nix/store/p54qjhcsv7hl5hga1lg72nw802w7y2y3-python3.13-pytest-9.1.1"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/b852018jrdpshbc5rlsc6k4gz9mfclsz-python3.13-pytest-9.1.1",
+              "default": true
+            },
+            {
+              "name": "dist",
+              "path": "/nix/store/zjbdpp44x4dqli851km5fhhr3d5v1bfz-python3.13-pytest-9.1.1-dist"
+            },
+            {
+              "name": "testout",
+              "path": "/nix/store/2iw5iwg42695iai04aczdxlab1ax72vq-python3.13-pytest-9.1.1-testout"
+            }
+          ],
+          "store_path": "/nix/store/b852018jrdpshbc5rlsc6k4gz9mfclsz-python3.13-pytest-9.1.1"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/6hgkgy9ka3h3zshn28f0qgmbmvc8d5gv-python3.13-pytest-9.1.1",
+              "default": true
+            },
+            {
+              "name": "dist",
+              "path": "/nix/store/j1jizfh74yia524h121rnhixd783fk2y-python3.13-pytest-9.1.1-dist"
+            },
+            {
+              "name": "testout",
+              "path": "/nix/store/wy5jp4sqrzicwvisw3wss456j9jfsy3g-python3.13-pytest-9.1.1-testout"
+            }
+          ],
+          "store_path": "/nix/store/6hgkgy9ka3h3zshn28f0qgmbmvc8d5gv-python3.13-pytest-9.1.1"
+        }
+      }
+    }
+  }
+}
