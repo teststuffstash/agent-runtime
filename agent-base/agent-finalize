@@ -35,7 +35,8 @@ def or_usage():
     """Cumulative USD usage for the current OpenRouter key. Returns None when UNKNOWN — a dead/
     expired key 401s this endpoint, and failing INTO 0.0 made exactly the runs that die on key
     problems report ~$0/negative cost (agent-runtime#12; the probe-fails-into-a-value class,
-    homelab TICK-LOG rule #6). The caller must treat None as 'unknown', never as a number."""
+    homelab TICK-LOG rule #6). A 200 whose body omits `usage` says the same thing by a different
+    route (#41). The caller must treat None as 'unknown', never as a number."""
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         return None
@@ -49,7 +50,14 @@ def or_usage():
             headers={"Authorization": "Bearer " + key},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
-            return float(json.load(r)["data"].get("usage") or 0.0)
+            usage = json.load(r)["data"].get("usage")
+        # A 200 that carries no `usage` (absent key, or an explicit null) reported no figure — the
+        # probe SUCCEEDED and still learned nothing, which is unknown, not zero (agent-runtime#41).
+        # `or 0.0` flattened that into an authoritative $0 that subtracts against the banked
+        # baseline exactly like the dead-key 401 did. A reported 0.0 is a fact and stays a number.
+        if usage is None:
+            return None
+        return float(usage)
     except Exception:
         return None
 
