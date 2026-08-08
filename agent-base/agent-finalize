@@ -187,33 +187,38 @@ def parse_outcome(log_path):
     return found
 
 
-def classify(log_path, stats):
-    """Classify the run into (exit_status, error_class) — the FU-057 enabler.
-
-    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | failed
-    error_class = the dominant machine-detectable cause ('' when clean). Derived from run.log
-    patterns + the run's OUTCOME (did it open a PR / pass CI). This is what makes the model-blacklist
-    call possible (docs/agents/observability-and-retro.md §B1): the ledger needs to know *why* a run
-    ended, not just that it cost $X and took Ys.
-
-    Why not trust HARNESS_EXIT: measured 2026-07-09, goose exits 0 even when it storms on auth or
-    dies to a `-32602` truncation (worker-r3 issue-1: 530 auth failures, no PR, exit 0). So SUCCESS
-    is judged by artifact (pr_url / ci_passed), and FAILURE by the dominant log pattern — the exit
-    code is only a last-resort tiebreak. Patterns are line-precise (not bare "401", which matches
-    digits inside filenames/ids — a successful run logged 21 such false hits).
-    """
+def _log_text(log_path):
+    if not log_path:
+        return ""
     try:
-        harness_exit = int(str(os.environ.get("HARNESS_EXIT", "")).strip() or "0")
-    except ValueError:
-        harness_exit = 0
-    text = ""
-    if log_path:
-        try:
-            with open(log_path, errors="replace") as fh:
-                text = fh.read()
-        except Exception:
-            text = ""
+        with open(log_path, errors="replace") as fh:
+            return fh.read()
+    except Exception:
+        return ""
 
+
+def _watchdog_class():
+    """The watchdog's verdict, when it killed this run (#13). It writes a marker BEFORE the SIGTERM
+    because the signal alone is indistinguishable from any other kill — the run would land as
+    nonzero-exit-143, which says "someone stopped it" and nothing about why. Read the file, not the
+    exit code. Absent marker = the watchdog didn't fire; this stays out of the way entirely."""
+    try:
+        with open(os.environ.get("AGENT_WATCHDOG_MARKER", "/tmp/agent-watchdog-class")) as fh:
+            return fh.read().strip()[:40]
+    except Exception:
+        return ""
+
+
+def failure_signature(text, ci_passed=None, watchdog=""):
+    """The dominant machine-detectable failure in a run log → (exit_status, error_class), or None.
+
+    Pure over the log text so the precedence is testable, and shared: `classify` and
+    `salvage_push` must answer "did this round die?" the same way (#36) — two inlined chains that
+    happen to agree today is how that bug got written in the first place.
+
+    Precedence: a broken key dooms the whole run, so it outranks the truncation it usually ends on;
+    ≥5 auth failures = a storm, not a transient token refresh.
+    """
     def n(pat):
         return len(re.findall(pat, text, re.IGNORECASE | re.MULTILINE))
 
@@ -236,16 +241,76 @@ def classify(log_path, stats):
     timeout = n(r"context deadline exceeded|operation timed out|request timed out|"
                 r"timeout of \d+\s*ms exceeded")
 
-    # The watchdog's verdict, when it killed this run (#13). It writes a marker BEFORE the SIGTERM
-    # because the signal alone is indistinguishable from any other kill — the run would land as
-    # nonzero-exit-143, which says "someone stopped it" and nothing about why. Read the file, not
-    # the exit code. Absent marker = the watchdog didn't fire; this stays out of the way entirely.
-    watchdog = ""
+    if budget:
+        return "budget-403", "budget-exhausted"
+    if gitauth and ci_passed is True:
+        return "no-artifact", "token-expiry"  # green work, dead git token at push/PR time
+    if auth >= 5:
+        return "auth-storm", "http-403-storm" if forbidden >= auth - forbidden else "http-401-storm"
+    if watchdog == "repetition-loop":
+        # Below budget/auth on purpose: kimi-k3's repetition WAS its post-403 retry storm, and
+        # "budget-exhausted" is the cause worth striking on — the repetition is that death's
+        # symptom. When no key/billing signature is present, this is the real class.
+        return "harness-death", "repetition-loop"
+    if truncation:
+        return "harness-death", "goose-32602-truncation"
+    if panic:
+        return "harness-death", "goose-panic"
+    if timeout:
+        return "timeout", "timeout"
+    return None
+
+
+def died_this_round(fail, stats):
+    """"Did THIS ROUND die?" — the one predicate behind both of #36's surfaces.
+
+    A `pr_url` proves an ARTIFACT EXISTS. It never proves THIS ROUND produced it: from round 2 on
+    the URL is routinely the PREVIOUS round's PR, adopted by `derive_pr_url` from the branch (or,
+    2026-08-07, from the branch the launcher's salvage pushed). Both call sites used to read the
+    one as the other, so on a fix round — which by definition always has a PR — `classify`
+    returned `clean` for a run that died and `salvage_push` banked nothing. circles#32 r3 is the
+    measured case: the identical `-32602` truncation struck the model in r1 and read `clean` in r3.
+
+    The tiebreak is the recipe's structured end-of-run report (`reproduced`/`ci_passed`/
+    `root_cause`, lifted into stats by `parse_outcome`) — the same evidence the `blocked-deliberate`
+    class already trusts. A round that emitted it reached its own finish line, so signature strings
+    left in its log are text, not a death; a round that never emitted one did not finish, and its
+    dominant signature stands whatever PR is lying around. That direction matters both ways: the
+    silent-death half of #36 is the dangerous one, but flipping every log that merely CONTAINS
+    "-32602" into a strike would fabricate deaths (this repo's own test suite writes those strings
+    into every green run.log it produces).
+
+    `no-artifact`/token-expiry is excluded on purpose: it is a claim about the ARTIFACT ("green
+    work never reached GitHub"), which an existing PR contradicts. Only session deaths outrank it.
+    """
+    if not fail or fail[0] == "no-artifact":
+        return False
+    return not any(k in stats for k in ("reproduced", "ci_passed", "root_cause"))
+
+
+def classify(log_path, stats):
+    """Classify the run into (exit_status, error_class) — the FU-057 enabler.
+
+    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | failed
+    error_class = the dominant machine-detectable cause ('' when clean). Derived from run.log
+    patterns + the run's OUTCOME (did it open a PR / pass CI). This is what makes the model-blacklist
+    call possible (docs/agents/observability-and-retro.md §B1): the ledger needs to know *why* a run
+    ended, not just that it cost $X and took Ys.
+
+    Why not trust HARNESS_EXIT: measured 2026-07-09, goose exits 0 even when it storms on auth or
+    dies to a `-32602` truncation (worker-r3 issue-1: 530 auth failures, no PR, exit 0). So SUCCESS
+    is judged by artifact (pr_url / ci_passed), and FAILURE by the dominant log pattern — the exit
+    code is only a last-resort tiebreak. Patterns are line-precise (not bare "401", which matches
+    digits inside filenames/ids — a successful run logged 21 such false hits).
+
+    The artifact answers "did something ship", NOT "did this round end well" (#36): a death
+    signature from a round that never reported its own end outranks it — see `died_this_round`.
+    """
     try:
-        with open(os.environ.get("AGENT_WATCHDOG_MARKER", "/tmp/agent-watchdog-class")) as fh:
-            watchdog = fh.read().strip()[:40]
-    except Exception:
-        watchdog = ""
+        harness_exit = int(str(os.environ.get("HARNESS_EXIT", "")).strip() or "0")
+    except ValueError:
+        harness_exit = 0
+    text = _log_text(log_path)
 
     ci_passed = stats.get("ci_passed")
     # SUCCESS requires the ARTIFACT — a PR. ci_passed alone is NOT clean: a run whose work went
@@ -253,29 +318,16 @@ def classify(log_path, stats):
     # `clean` and poison the model-health pivot with a success that shipped nothing (oracle-fleet#1
     # attempt 1). Those runs are `no-artifact` now.
     succeeded = bool(stats.get("pr_url"))
+    fail = failure_signature(text, ci_passed, _watchdog_class())
 
-    # Dominant failure signature (precedence: a broken key dooms the whole run, so it outranks the
-    # truncation it usually ends on; ≥5 auth failures = a storm, not a transient token refresh).
-    if budget:
-        fail = ("budget-403", "budget-exhausted")
-    elif gitauth and ci_passed is True:
-        fail = ("no-artifact", "token-expiry")  # green work, dead git token at push/PR time
-    elif auth >= 5:
-        fail = ("auth-storm", "http-403-storm" if forbidden >= auth - forbidden else "http-401-storm")
-    elif watchdog == "repetition-loop":
-        # Below budget/auth on purpose: kimi-k3's repetition WAS its post-403 retry storm, and
-        # "budget-exhausted" is the cause worth striking on — the repetition is that death's
-        # symptom. When no key/billing signature is present, this is the real class.
-        fail = ("harness-death", "repetition-loop")
-    elif truncation:
-        fail = ("harness-death", "goose-32602-truncation")
-    elif panic:
-        fail = ("harness-death", "goose-panic")
-    elif timeout:
-        fail = ("timeout", "timeout")
-    else:
-        fail = None
-
+    # #36: a DEATH outranks the artifact. `succeeded` used to short-circuit here, before `fail` was
+    # consulted at all — and since a fix round always has a PR (that is what a fix round is), from
+    # round 2 on NO failure signature could ever fire: not truncation, not panic, not auth-storm,
+    # not budget. Every death on a fix round reported `clean`, so the model was never struck and
+    # the router was told the run was fine (circles#32 r3, circles#58). Only the first round of an
+    # issue could strike anything. `died_this_round` holds the line in both directions.
+    if died_this_round(fail, stats):
+        return fail
     if succeeded:
         if ci_passed is False:
             return "ci-failed", "ci-red"
@@ -367,7 +419,7 @@ def _resolve_branch():
     return wd, base, branch
 
 
-def salvage_push(stats):
+def salvage_push(stats, log_path=""):
     """FU-064a: harness-owned terminal push. If the run ends without a PR but the work branch has
     commits (and/or uncommitted state), commit + push it — a died run must leave a RESUMABLE branch,
     never zero artifact. The push-early recipe rule failed to bind on 3 runs / 2 models (homelab
@@ -376,10 +428,19 @@ def salvage_push(stats):
     opened this round → nothing to salvage); a derived pr_url can come from an OLDER still-open PR
     on a resumed branch, and skipping on that would silently drop this round's commits.
 
+    #36: the self-report is not proof of success either. A fix round that echoes the PR it was sent
+    to fix, then DIES, self-reports a pr_url while its working tree holds everything the round did
+    — so the guard asks the run log the same question `classify` asks (`died_this_round`) and skips
+    only for a round that reached its own end. The guard still has to exist: salvaging a genuinely
+    finished round would `git add -A` whatever junk the tree holds and force-push a wip commit onto
+    a PR already under review.
+
     Sets `salvaged_branch` when a push lands, and `salvage_undetermined` when the branch state
     could not be established (#33) — the strike comment must not turn "I could not tell" into
     "there is nothing to resume"."""
-    if stats.get("pr_url"):
+    if stats.get("pr_url") and not died_this_round(
+            failure_signature(_log_text(log_path), stats.get("ci_passed"), _watchdog_class()),
+            stats):
         return
     wd, base, branch = _resolve_branch()
     if branch is None:
@@ -882,7 +943,7 @@ def finalize(log_path):
     # rides the stats line and the strike comment. Also before derive_pr_url: a resumed branch can
     # carry an OLDER still-open PR, and a derived pr_url must never suppress the salvage of THIS
     # round's commits (review finding, #17).
-    salvage_push(stats)
+    salvage_push(stats, log_path)
     # Ground-truth pr_url before classify/bookkeeping — both key off it (a missing pr_url on a
     # PR-ful run skipped arming and mis-routed the stats comment into a strike).
     derive_pr_url(stats)

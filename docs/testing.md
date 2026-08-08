@@ -51,7 +51,7 @@ of two bugs that shipped green under the build-only gate:
 | bug | what a test would have caught |
 |---|---|
 | homelab FU-115b | a no-op detector reading `.commits[]?.commit.committedDate` — `gh` puts that field at top level, so it was `null` on every real input and the predicate returned "no-op" for every PR |
-| **agent-runtime#36** | `classify()` returns `clean` for a run that DIED, whenever a PR already exists — pinned by the strict `xfail` in `tests/test_classify.py` |
+| **agent-runtime#36** | `classify()` returns `clean` for a run that DIED, whenever a PR already exists — pinned by the strict `xfail` in `tests/test_classify.py` until the fix landed, and by `TestDerivedPrUrlMasksDeath` + `TestSalvageGuardOnAFixRound` since |
 
 #36 is worth reading in full, because it is the shape most likely to recur:
 
@@ -70,3 +70,11 @@ Measured on circles#32, 2026-08-06 — the *same* `-32602` truncation, opposite 
 | r3 | #39 existed, `pr_url` derived from it | `clean` / `""` — no strike, banked nothing |
 
 r3 ran 1255s and $0.0462, pushed no commit, and left every reviewer finding unaddressed.
+
+The fix is one predicate, `died_this_round(fail, stats)`, asked by both `classify()` and
+`salvage_push()`: a `pr_url` says an artifact EXISTS, never that THIS ROUND produced it, so a
+failure signature from a round that never emitted its structured end-of-run report outranks it.
+Writing a test for it means holding both directions at once — a run that died must not read
+`clean`, and a run that finished must not be struck for the signature strings its own log
+contains. This suite is the live example of the second half: it writes `-32602` and
+`401 unauthorized` into every green run.log a ride here produces.
