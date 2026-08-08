@@ -203,3 +203,62 @@ class TestRouterReportCost:
         payload = self._post(af, fake_urlopen, {"cost_unknown": True})
         assert float(payload.get("cost_usd") or 0.0) == 0.0  # receiver's exact expression
         json.dumps(payload)  # and it stays a JSON-serializable body
+
+
+class TestRouterReportRail:
+    """Which rail served the ride — agent-runtime#55, the coordinator-path half of homelab#158.
+
+    #158's acceptance is that every degraded ride's run-stats record `rail=subscription-fallback`,
+    so the cost of a fleet-wide degrade lands VISIBLY rather than dying with the pod label. The
+    launcher twin has fed it since homelab#158 (`agent-session.sh`: `--arg rail "${AGENT_RAIL:-}"`)
+    and `run_reports` grew the column in homelab#164 — but a coordinator-path ride has no attending
+    launcher (that is exactly why `router_report()` exists in-pod, FU-095 P1), so for precisely the
+    rides #158 was written about the store recorded `rail=""`.
+
+    `AGENT_RAIL` is already injected into the worker pod's env by the launcher, so this side is
+    self-sufficient: the value is read, never derived here.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _explicit_env(self, monkeypatch):
+        """Same pinning as the cost class, plus AGENT_RAIL — an ambient rail must not steer these."""
+        for var in ("AGENT_ROUND", "AGENT_STACK", "AGENT_TASK", "MODEL", "GOOSE_MODEL", "HOSTNAME",
+                    "AGENT_RAIL"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AGENT_REPORT_URL", "http://router.invalid/report")
+
+    def _post(self, af, fake_urlopen, stats, exit_status="clean", error_class=""):
+        box = fake_urlopen(lambda req: _Resp())
+        af.router_report(stats, exit_status, error_class)
+        return json.loads(box["data"].decode())
+
+    @pytest.mark.parametrize("rail", ["subscription-fallback", "subscription", "openrouter"])
+    def test_rail_is_reported_verbatim(self, af, fake_urlopen, monkeypatch, rail):
+        """The three values the launcher sets. The pod reports what it was told, unedited."""
+        monkeypatch.setenv("AGENT_RAIL", rail)
+        payload = self._post(af, fake_urlopen, {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        assert payload["rail"] == rail
+
+    def test_degraded_ride_records_the_fallback_rail(self, af, fake_urlopen, monkeypatch):
+        """#158's acceptance clause on the shape it was written about: a fleet-wide degrade, on the
+        coordinator path, whose cost must be attributable to the fallback rail after the fact."""
+        monkeypatch.setenv("AGENT_RAIL", "subscription-fallback")
+        payload = self._post(af, fake_urlopen, {"subscription": True, "turns": 42}, "no-pr", "")
+        assert payload["rail"] == "subscription-fallback"
+        assert payload["cost_usd"] is None  # a degraded ride still fabricates no dollars (#12)
+
+    def test_absent_rail_is_an_empty_string_key_not_a_missing_one(self, af, fake_urlopen):
+        """No AGENT_RAIL in the env (an older launcher, or a hand-run pod) is "" — the same
+        not-stated the column already holds. The key must still be PRESENT and a string: the
+        receiver does `d.get("rail")` and the column is keyed, not positional."""
+        payload = self._post(af, fake_urlopen, {"cost_usd": 0.0})
+        assert payload["rail"] == ""
+
+    def test_payload_stays_a_serializable_body_the_receiver_can_ignore(self, af, fake_urlopen,
+                                                                      monkeypatch):
+        """Backward-compatible in both directions: adding a key must not break the POST against a
+        receiver that has not learned it, so it rides as a plain JSON string like every sibling."""
+        monkeypatch.setenv("AGENT_RAIL", "subscription-fallback")
+        payload = self._post(af, fake_urlopen, {"cost_unknown": True}, "budget-403", "budget-exhausted")
+        assert isinstance(payload["rail"], str)
+        json.dumps(payload)
