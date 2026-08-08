@@ -49,7 +49,8 @@ def logfile(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch, tmp_path):
-    """classify() reads HARNESS_EXIT, AGENT_TASK and the watchdog marker from the environment.
+    """classify() reads HARNESS_EXIT, AGENT_TASK and the watchdog marker from the environment;
+    the resumable-branch answer (#33) reads WORK_BRANCH.
 
     Left to the ambient environment these leak between tests and, worse, make a green suite depend
     on whatever the developer happened to export. Every test starts from a known-empty state and
@@ -57,4 +58,5 @@ def _clean_env(monkeypatch, tmp_path):
     """
     monkeypatch.delenv("HARNESS_EXIT", raising=False)
     monkeypatch.delenv("AGENT_TASK", raising=False)
+    monkeypatch.delenv("WORK_BRANCH", raising=False)
     monkeypatch.setenv("AGENT_WATCHDOG_MARKER", str(tmp_path / "no-such-marker"))
