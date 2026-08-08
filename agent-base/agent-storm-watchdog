@@ -26,17 +26,43 @@
 # share held by a single line was 100% on both sick rides vs 8.1% (mimo) and 0% (opus) on healthy
 # ones — hence a 50% default with enormous margin.
 #
-#   ⚠ Blank lines MUST be excluded: 3,722 of deepseek's 8,910 lines were empty, so a naive
-#     most-frequent-line check reports ~100% on a perfectly healthy log.
+# TWO signals, because loops arrive at two speeds (#13 round 2 — the share rule alone was deployed
+# for three days and a human did the stopping in every case below):
+#
+#   share   — one line holds ≥ $STORM_REPEAT_PCT% of the last $STORM_REPEAT_WINDOW non-blank lines.
+#             Catches LOUD loops, which emit hundreds of lines a minute.
+#   tail    — the last $REPEAT_TAIL non-blank lines collapse to ≤ $REPEAT_TAIL_DISTINCT distinct
+#             ones. Catches SLOW loops, where the model emits ONE line per completion: circles#42
+#             (2026-08-07) repeated a nag line 65× over 2h14m with the pod phase reading `Running`
+#             the whole time, and 65 repeats never dilute a 200-line window past ~32%, so the share
+#             rule never armed. Same for the 2026-08-08 deepseek-v4-flash ride, whose last 40 lines
+#             collapsed to 2 distinct. A short tail sees both; a 200-line window cannot, because it
+#             stays diluted by the pre-loop history the ride will never scroll past.
+#
+#   40/≤3 are hardcoded, not env: they are the homelab meta-watch belt's measured shape
+#   (agents/meta-watch-loop.sh), where a real looping tail gives distinct=1 and a healthy ride's
+#   tail gives 31. Margin that wide needs no tuning knob, and the issue's scope guidance is
+#   explicit — no config surface until a second shape demands it. STORM_REPEAT_PCT=0 still disables
+#   the whole rule, both signals.
+#
+#   ⚠ Blank lines MUST be excluded, and BEFORE the tail is taken: 3,722 of deepseek's 8,910 lines
+#     were empty, so a naive most-frequent-line check reports ~100% on a perfectly healthy log, and
+#     a raw last-40 tail of a half-blank log collapses to a handful of distinct lines by itself.
+#
+# NOT covered, deliberately: the *quiet* loop (openrouter-operator#14, 2026-08-05) — 8 consecutive
+# completions pinned at the 16384 max_tokens floor while the log stayed byte-identical. Nothing
+# repeats in run.log, so no run.log rule can see it; that needs the proxy-side signal (N completions
+# at max_tokens with no tool-call progress) and stays a follow-up.
 #
 # Reproduce any decision this makes against a saved log (they are uploaded per ride to
 # s3://agent-transcripts/<stack>/<task>/<session>/run.log):
 #
-#   agent-storm-watchdog --check /path/to/run.log      # prints the worst window share, exits 0
+#   agent-storm-watchdog --check /path/to/run.log      # prints both signals + the verdict, exits 0
 #
 #   Env: STORM_WATCHDOG=off to disable · STORM_LOG=/tmp/run.log · STORM_THRESHOLD=10
 #        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
-#        STORM_REPEAT_PCT=50 (0 disables) · STORM_REPEAT_WINDOW=200 · STORM_REPEAT_MIN=40
+#        STORM_REPEAT_PCT=50 (0 disables both repetition signals) · STORM_REPEAT_WINDOW=200
+#        STORM_REPEAT_MIN=40
 #        STORM_MARKER=/tmp/agent-watchdog-class (agent-finalize reads it for the error_class)
 set -u
 
@@ -47,29 +73,73 @@ REPEAT_WINDOW="${STORM_REPEAT_WINDOW:-200}"
 REPEAT_MIN="${STORM_REPEAT_MIN:-40}"
 MARKER="${STORM_MARKER:-/tmp/agent-watchdog-class}"
 
-# Share (whole %) of the last $REPEAT_WINDOW NON-BLANK lines held by the most frequent one, after
-# trimming surrounding whitespace. Prints 0 when the window is too small to judge — a run that has
-# barely started must never be killed on three identical banner lines.
-repeat_share() { # <logfile>
-  tail -n "$REPEAT_WINDOW" "$1" 2>/dev/null | sed 's/[[:space:]]*$//; s/^[[:space:]]*//' \
-    | awk 'NF' | sort | uniq -c | sort -rn \
+# Slow-loop signal. Not env-configurable on purpose — see the header.
+REPEAT_TAIL=40           # non-blank lines
+REPEAT_TAIL_DISTINCT=3   # ≤ this many distinct lines in that tail = a loop (healthy rides give 31)
+REPEAT_TAIL_SCAN=1000    # raw lines read to find $REPEAT_TAIL non-blank ones (deepseek: 42% blank)
+
+# --- shared arithmetic ------------------------------------------------------------------------
+# Both the live poll and the offline replay funnel through these three, so `--check` cannot drift
+# from the rule it claims to reproduce. Each reads lines on stdin.
+_norm() { sed 's/[[:space:]]*$//; s/^[[:space:]]*//' | awk 'NF'; }  # trim, drop blanks
+
+# Share (whole %) held by the most frequent line. Prints 0 when there is too little to judge — a run
+# that has barely started must never be killed on three identical banner lines.
+_share() {
+  sort | uniq -c | sort -rn \
     | awk -v min="$REPEAT_MIN" 'NR==1{top=$1} {n+=$1} END{if (n<min || n==0) print 0; else printf "%d\n", top*100/n}'
 }
 
-# Offline reproduction: the live loop only ever sees the TAIL, so replay a saved log window by
-# window and report the worst one — that is the number a post-mortem argues about.
+# Distinct-line count, but ONLY once the window is full: a partial tail prints 999 ("no verdict"),
+# never a small number. Without that guard the first dozen lines of every run — banner, banner,
+# banner — read as distinct=1 and every ride dies at startup.
+_distinct() {
+  sort | uniq -c \
+    | awk -v want="$REPEAT_TAIL" '{d++; n+=$1} END{if (n+0 < want) print 999; else print d+0}'
+}
+
+repeat_share() { tail -n "$REPEAT_WINDOW" "$1" 2>/dev/null | _norm | _share; }
+tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n "$REPEAT_TAIL" | _distinct; }
+
+# Offline reproduction: the live loop only ever sees `tail -n N` of a log that is still being
+# written, so replay a saved log at successive END positions and report the worst view.
+#
+#   ⚠ Walk window ENDS, not starts. Stepping starts (the shape shipped in #29) slices a final,
+#     SHORT window at EOF — for circles#42 that is 105 lines of which 65 are the loop, reported as
+#     "61% → WOULD KILL" for a log the deployed rule provably never killed (it ran 2h14m). The live
+#     tail there is a full 200 lines and 32%. A replay that flatters the rule is worse than none:
+#     it is the reason the gap took three more live loops to find.
 if [ "${1:-}" = "--check" ]; then
   [ -f "${2:-}" ] || { echo "usage: agent-storm-watchdog --check <run.log>" >&2; exit 2; }
-  _total="$(wc -l < "$2")"; _worst=0; _at=0; _step=$((REPEAT_WINDOW / 2)); _i=0
-  while [ "$_i" -lt "$_total" ]; do
-    _s="$(sed -n "$((_i + 1)),$((_i + REPEAT_WINDOW))p" "$2" | sed 's/[[:space:]]*$//; s/^[[:space:]]*//' \
-      | awk 'NF' | sort | uniq -c | sort -rn \
-      | awk -v min="$REPEAT_MIN" 'NR==1{top=$1} {n+=$1} END{if (n<min || n==0) print 0; else printf "%d\n", top*100/n}')"
-    [ "$_s" -gt "$_worst" ] && { _worst="$_s"; _at="$_i"; }
-    _i=$((_i + _step))
+  _total="$(wc -l < "$2")"; _total="${_total:-0}"
+  _worst=0; _at=0; _tight=999; _tat=0
+  _step=$((REPEAT_WINDOW / 4)); [ "$_step" -lt 1 ] && _step=1
+  _e="$REPEAT_WINDOW"
+  while :; do
+    [ "$_e" -gt "$_total" ] && _e="$_total"
+    _s=$((_e - REPEAT_WINDOW + 1)); [ "$_s" -lt 1 ] && _s=1
+    _sh="$(sed -n "${_s},${_e}p" "$2" | _norm | _share)"; _sh="${_sh:-0}"
+    [ "$_sh" -gt "$_worst" ] && { _worst="$_sh"; _at="$_e"; }
+    _s=$((_e - REPEAT_TAIL_SCAN + 1)); [ "$_s" -lt 1 ] && _s=1
+    _dt="$(sed -n "${_s},${_e}p" "$2" | _norm | tail -n "$REPEAT_TAIL" | _distinct)"; _dt="${_dt:-999}"
+    [ "$_dt" -lt "$_tight" ] && { _tight="$_dt"; _tat="$_e"; }
+    [ "$_e" -ge "$_total" ] && break
+    _e=$((_e + _step))
   done
-  echo "worst window: ${_worst}% at line ${_at} (threshold ${REPEAT_PCT}%, window ${REPEAT_WINDOW}, min ${REPEAT_MIN} non-blank)"
-  [ "$_worst" -ge "$REPEAT_PCT" ] && echo "→ WOULD KILL" || echo "→ would not kill"
+  echo "worst window: ${_worst}% at line ${_at} (one line's share of the last ${REPEAT_WINDOW} lines; threshold ${REPEAT_PCT}%, min ${REPEAT_MIN} non-blank)"
+  echo "tightest tail: ${_tight} distinct at line ${_tat} (of the last ${REPEAT_TAIL} non-blank lines; threshold ≤${REPEAT_TAIL_DISTINCT}, 999 = too few lines to judge)"
+  if [ "$REPEAT_PCT" -le 0 ]; then
+    echo "→ would not kill (repetition rule disabled: STORM_REPEAT_PCT=0)"
+  elif [ "$_worst" -ge "$REPEAT_PCT" ]; then
+    echo "→ WOULD KILL (share: one line holds ${_worst}% of a ${REPEAT_WINDOW}-line window)"
+  elif [ "$_tight" -le "$REPEAT_TAIL_DISTINCT" ]; then
+    echo "→ WOULD KILL (tail: ${_tight} distinct lines in the last ${REPEAT_TAIL} non-blank)"
+  else
+    echo "→ would not kill"
+  fi
+  # ⚠ A verdict here is the arithmetic only. The live rule additionally needs the signal to hold on
+  # TWO consecutive polls with the log still growing, so a transient burst that reads WOULD KILL in
+  # replay may never arm in production.
   exit 0
 fi
 
@@ -118,13 +188,23 @@ while :; do
   # SIGTERM alone only says nonzero-exit-143, which under-describes this death.
   if [ "$REPEAT_PCT" -gt 0 ]; then
     share="$(repeat_share "$LOG")"; share="${share:-0}"
+    distinct="$(tail_distinct "$LOG")"; distinct="${distinct:-999}"
     lines="$(wc -l < "$LOG" 2>/dev/null || echo 0)"; lines="${lines:-0}"
-    if [ "$share" -ge "$REPEAT_PCT" ] && [ "$prev_rep_hot" = 1 ] && [ "$lines" -gt "$prev_lines" ]; then
+    rep_hot=0; rep_why=""
+    if [ "$share" -ge "$REPEAT_PCT" ]; then
+      rep_hot=1; rep_why="one line holds ${share}% of the last ${REPEAT_WINDOW} non-blank log lines"
+    elif [ "$distinct" -le "$REPEAT_TAIL_DISTINCT" ]; then
+      rep_hot=1; rep_why="the last ${REPEAT_TAIL} non-blank log lines collapse to ${distinct} distinct line(s)"
+    fi
+    # "still growing" is what makes the SLOW loop survivable to detect: circles#42 wrote roughly one
+    # line per completion, so most 10s polls see no growth at all. The signal simply stays hot until
+    # a poll straddles the next repeat — then the pair (hot last poll, new line now) fires.
+    if [ "$rep_hot" = 1 ] && [ "$prev_rep_hot" = 1 ] && [ "$lines" -gt "$prev_lines" ]; then
       echo "repetition-loop" > "$MARKER" 2>/dev/null || true
-      terminate_harness "one line holds ${share}% of the last ${REPEAT_WINDOW} non-blank log lines on two consecutive polls, log still growing — degenerate repetition (#13)"
+      terminate_harness "${rep_why} on two consecutive polls, log still growing — degenerate repetition (#13)"
       exit 0
     fi
-    [ "$share" -ge "$REPEAT_PCT" ] && prev_rep_hot=1 || prev_rep_hot=0
+    prev_rep_hot="$rep_hot"
     prev_lines="$lines"
   fi
   [ "$dens" -ge "$THRESHOLD" ] && prev_hot=1 || prev_hot=0

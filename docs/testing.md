@@ -16,10 +16,20 @@ No venv, no `uv`, no lockfile to drift: pytest comes from devbox, and the harnes
 ## Why the tests load the module by path
 
 `agent-finalize` and `agent-storm-watchdog` ship **extensionless** — they are `COPY`d onto `PATH`
-in the image, so they are executables, not importables. `tests/conftest.py` loads them via
-`importlib` from an explicit path. Import is side-effect free because the script guards its
+in the image, so they are executables, not importables. `tests/conftest.py` loads `agent-finalize`
+via `importlib` from an explicit path. Import is side-effect free because the script guards its
 entrypoint with `if __name__ == "__main__":`; `test_import_is_side_effect_free` exists so that
 guarantee fails loudly if that guard is ever removed.
+
+`agent-storm-watchdog` is bash, so there is nothing to import: its seam is `--check <run.log>`,
+which runs the live rule's arithmetic over a saved log and prints the verdict.
+`tests/test_watchdog_repetition.py` drives it with `subprocess` over synthetic logs — still
+hermetic (a temp file in, a verdict out), just spelled in a different language.
+
+⚠ Those tests never start the watchdog's poll loop. `terminate_harness()` runs
+`pkill -x goose|opencode|claude|.claude-wrapped`, so a test that reached the kill path would
+SIGTERM the harness running the tests. `--check` is the same arithmetic without the kill; the
+arm/confirm/kill wiring around it is reviewed, not covered.
 
 ## The rules
 
