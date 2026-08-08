@@ -9,5 +9,5 @@ on:
 concurrency: { group: update-pr-branch, cancel-in-progress: false }
 jobs:
   update:
-    uses: teststuffstash/homelab/.github/workflows/update-pr-branch.reusable.yml@master
+    uses: teststuffstash/homelab/.github/workflows/update-pr-branch.reusable.yml@4f6f9260836c7130150e02d6adf7f7965e5eed80 # master
     secrets: inherit
