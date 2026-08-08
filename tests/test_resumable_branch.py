@@ -239,3 +239,80 @@ class TestSalvageMarksUnknown:
         stats = {}
         af.salvage_push(stats)
         assert stats == {}
+
+
+class TestSalvageGuardOnAFixRound:
+    """agent-runtime#36's second surface: `salvage_push`'s early return on `pr_url`.
+
+    Same root as the classify() bug — "a pr_url exists" read as "this round succeeded" — and the
+    same fix: the run log decides. A death signature with no end-of-run report means this round
+    did not finish, so its working tree still has to be banked; anything else leaves the guard
+    exactly where it was.
+    """
+
+    def test_a_died_round_salvages_even_though_a_pr_url_exists(self, af, monkeypatch, tmp_path):
+        """agent-runtime#36's second surface: the guard's "a pr_url exists" is not "this round
+        succeeded".
+
+        On a FIX round a PR always exists — that is what a fix round is — so the early return
+        disabled salvage for exactly the rounds that iterate on review feedback. The run log is
+        the tiebreak: a death signature with no end-of-run report means this round did not finish,
+        whatever PR its predecessor left behind. circles#32 r3 (2026-08-06) is the case.
+        """
+        (tmp_path / ".git").mkdir()
+        log = tmp_path / "run.log"
+        log.write_text("-32602: the response may have been truncated.\n", encoding="utf-8")
+        monkeypatch.setenv("WORKDIR", str(tmp_path))
+        monkeypatch.setenv("BASE_REF", "master")
+
+        class _Done:
+            def __init__(self, rc=0, out="", err=""):
+                self.returncode, self.stdout, self.stderr = rc, out, err
+
+        def _fake_run(argv, **kw):
+            if "rev-parse" in argv:
+                return _Done(out="fix/issue-32-arcs\n")
+            if "status" in argv:
+                return _Done(out=" M tests/test_render.py\n")
+            if "rev-list" in argv:
+                return _Done(out="1\n")
+            return _Done()
+
+        monkeypatch.setattr(af.subprocess, "run", _fake_run)
+        stats = {"pr_url": "https://github.com/x/circles/pull/39"}
+        af.salvage_push(stats, str(log))
+        assert stats.get("salvaged_branch") == "fix/issue-32-arcs"
+
+    def test_a_round_that_reported_its_own_end_still_skips_salvage(self, af, monkeypatch, tmp_path):
+        """The guard the fix must KEEP: a round that opened a PR and reported its end is done.
+
+        Salvaging there would `git add -A` whatever junk the tree holds and force-push a
+        wip commit onto a PR that is already under review. Nothing may run on this path — not
+        even `git status`.
+        """
+        (tmp_path / ".git").mkdir()
+        log = tmp_path / "run.log"
+        log.write_text("all fine\n", encoding="utf-8")
+        monkeypatch.setenv("WORKDIR", str(tmp_path))
+
+        def _boom(*a, **kw):  # noqa: ARG001 — the point is that it is never called
+            raise AssertionError("salvage must not touch git on a round that reported success")
+
+        monkeypatch.setattr(af.subprocess, "run", _boom)
+        stats = {"pr_url": "https://github.com/x/circles/pull/39", "ci_passed": True,
+                 "reproduced": True}
+        af.salvage_push(stats, str(log))
+        assert stats == {"pr_url": "https://github.com/x/circles/pull/39", "ci_passed": True,
+                         "reproduced": True}
+
+    def test_no_log_to_read_keeps_the_pr_url_skip(self, af, monkeypatch, tmp_path):
+        """No log path (the arg finalize passes can be empty): no death is detectable, so the
+        conservative pre-#36 behaviour stands rather than force-pushing on a guess."""
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("WORKDIR", str(tmp_path))
+
+        def _boom(*a, **kw):
+            raise AssertionError("salvage must not touch git when no death is detectable")
+
+        monkeypatch.setattr(af.subprocess, "run", _boom)
+        af.salvage_push({"pr_url": "https://github.com/x/circles/pull/39"})
