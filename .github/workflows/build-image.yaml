@@ -41,15 +41,31 @@ jobs:
           SHA=$(git rev-parse --short=12 HEAD)
           DATE=$(git show -s --format=%cd --date=format:'%Y.%-m.%-d' HEAD)
           echo "tag=${DATE}-g${SHA}" >> "$GITHUB_OUTPUT"
+      # Only the VERSIONED tag is pushed here. This step's success is the job's red/green, and the
+      # job's success is what deploy-pin waits on — so the gate means exactly "the load-bearing
+      # artifact shipped". That tag is what homelab agents/images.env pins, so it is the only one
+      # any worker pod actually pulls.
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: agent-base/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/agent-base:${{ steps.ver.outputs.tag }}
-            ghcr.io/${{ github.repository_owner }}/agent-base:latest
+          tags: ghcr.io/${{ github.repository_owner }}/agent-base:${{ steps.ver.outputs.tag }}
+      # :latest is a convenience alias, NOT load-bearing: its only consumer is the fallback default
+      # in homelab agents/agent-session.sh, which images.env's pin means nothing should ever reach.
+      # It was pushed by the step above until #35, when a transient ghcr secondary-rate-limit 403 on
+      # the :latest push alone failed the `image` job and therefore SKIPPED deploy-pin — the versioned
+      # tag had shipped fine, but no pin PR opened and the fix reached no worker pod. Split out and
+      # non-fatal so a tag nothing depends on cannot gate the one everything does. continue-on-error
+      # (not `|| true`) on purpose: the step still reports red in the run summary, so the flake stays
+      # observable instead of swallowed. imagetools create is a registry-side manifest copy of the
+      # tag just pushed — no rebuild, no second push of the layers.
+      - name: "Alias :latest to the versioned tag (non-fatal — #35)"
+        continue-on-error: true
+        run: |
+          IMG="ghcr.io/${{ github.repository_owner }}/agent-base"
+          docker buildx imagetools create -t "${IMG}:latest" "${IMG}:${{ steps.ver.outputs.tag }}"
 
   # deploy-pin: bump homelab agents/images.env to the just-built version → agent pods use the pinned
   # image (off :latest) on next spawn. First-party bump (CI-opened, not Renovate). ubuntu-latest for
