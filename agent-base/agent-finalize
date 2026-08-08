@@ -69,14 +69,37 @@ def router_report(stats, exit_status, error_class):
         "role": "worker",
         "round": int(os.environ.get("AGENT_ROUND") or 1),
         "model": os.environ.get("MODEL") or os.environ.get("GOOSE_MODEL") or stats.get("model") or "",
-        "cost_usd": float(stats.get("cost_usd") or 0.0),
+        # Never fabricate a cost (agent-runtime#12). `float(stats.get("cost_usd") or 0.0)` posted an
+        # authoritative-looking $0 for runs that HAVE no cost — the dead-key runs — which is the
+        # undercount push_metrics already refuses to emit, and which the budget gate now charges
+        # against. Unknown rides as null (+ the marker below); a genuine 0.0 stays a genuine 0.0,
+        # a distinction `or 0.0` also flattened. Null keeps the POST safe for today's receiver.
+        "cost_usd": None if stats.get("cost_usd") is None else float(stats["cost_usd"]),
         "error_class": error_class or "",
         "outcome": "pr" if stats.get("pr_url") else (exit_status or "no-pr"),
     }
+    # Only an OpenRouter-priced run can be backfilled from the activity API, so only it gets the
+    # flag — a subscription run has no key and no dollars, and is unknown in neither sense.
+    if stats.get("cost_unknown"):
+        payload["cost_unknown"] = True
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=5) as r:
         print("router-report: posted (%s) -> %s" % (url, r.status), flush=True)
+
+
+def cost_fields(usage_start, usage_end):
+    """The usage delta → the stats' cost fields. Pure, so the #12 invariant is testable.
+
+    Either end being None means the probe FAILED, not that it read zero — a dead key 401s
+    `/api/v1/key`, and subtracting against a failed probe is what produced negative costs on
+    exactly the key-death runs. Unknown is unknown: no number at all, `cost_unknown` instead, and
+    the ledger-reflex prices the run later from the activity API (FU-057). The clamp covers a
+    residual negative from usage accounting still settling — that is 0, never a discount.
+    """
+    if usage_start is None or usage_end is None:
+        return {"cost_unknown": True}
+    return {"cost_usd": max(0.0, round(usage_end - usage_start, 4))}
 
 
 def _read_float(path):
@@ -765,15 +788,8 @@ def finalize(log_path):
         if equiv is not None:
             stats["cost_usd_equiv"] = round(equiv, 4)
     else:
-        # Cost = usage delta — but ONLY when both ends are readable. A dead key makes the end-read
-        # fail; subtracting against a failed probe produced negative costs on exactly the key-death
-        # runs (agent-runtime#12). Unknown is unknown: cost_unknown=true, and the ledger-reflex can
-        # backfill from the OpenRouter activity API (management key) later.
-        usage_start, usage_end = _read_float(USAGE_START), or_usage()
-        if usage_start is not None and usage_end is not None:
-            stats["cost_usd"] = max(0.0, round(usage_end - usage_start, 4))
-        else:
-            stats["cost_unknown"] = True
+        # Cost = usage delta, but ONLY when both ends read — see cost_fields (agent-runtime#12).
+        stats.update(cost_fields(_read_float(USAGE_START), or_usage()))
     stats.update(parse_outcome(log_path) if log_path else {})
     # FU-064a: harness-owned terminal push BEFORE classification/bookkeeping, so the salvaged branch
     # rides the stats line and the strike comment. Also before derive_pr_url: a resumed branch can
