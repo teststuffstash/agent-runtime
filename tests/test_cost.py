@@ -81,6 +81,43 @@ class TestOrUsage:
         fake_urlopen(lambda req: io.StringIO(json.dumps({"data": {"usage": 12.5}})))
         assert af.or_usage() == 12.5
 
+    def test_missing_usage_field_is_unknown_not_zero(self, af, monkeypatch, fake_urlopen):
+        """agent-runtime#41: a 200 whose `data` carries no `usage` key at all.
+
+        The probe did not fail — but it did not learn a figure either, so this is the same
+        fabrication class as the dead key: `or 0.0` coalesced the absent field into an
+        authoritative zero that then subtracts against the banked baseline.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-live")
+        fake_urlopen(lambda req: io.StringIO(json.dumps({"data": {"limit": 5.0}})))
+        assert af.or_usage() is None
+
+    def test_explicit_null_usage_is_unknown_not_zero(self, af, monkeypatch, fake_urlopen):
+        """`"usage": null` is the same statement as the absent key: no figure was reported."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-live")
+        fake_urlopen(lambda req: io.StringIO(json.dumps({"data": {"usage": None}})))
+        assert af.or_usage() is None
+
+    def test_a_reported_zero_is_a_figure_not_unknown(self, af, monkeypatch, fake_urlopen):
+        """The other half of the distinction: a key that genuinely spent nothing reported it.
+
+        `0.0` here is a FACT, so it must stay a number — unknown-ising it would send a run that
+        really cost nothing to the activity-API backfill queue forever.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-live")
+        fake_urlopen(lambda req: io.StringIO(json.dumps({"data": {"usage": 0}})))
+        assert af.or_usage() == 0.0
+
+    def test_missing_usage_end_never_becomes_a_subtraction(self, af, monkeypatch, fake_urlopen):
+        """The composition the issue is actually about — the #12 harm, entered through a 200.
+
+        Baseline banked at $1.09, end probe answers 200-without-usage. Folding that into 0.0 makes
+        the delta negative exactly as the dead-key run did; unknown must ride as unknown.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-live")
+        fake_urlopen(lambda req: io.StringIO(json.dumps({"data": {}})))
+        assert af.cost_fields(1.0902, af.or_usage()) == {"cost_unknown": True}
+
 
 class TestCostFields:
     """The usage-delta decision, extracted so it can be tested without a live finalize run."""
