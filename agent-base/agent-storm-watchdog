@@ -58,6 +58,8 @@
 # s3://agent-transcripts/<stack>/<task>/<session>/run.log):
 #
 #   agent-storm-watchdog --check /path/to/run.log      # prints both signals + the verdict, exits 0
+#   agent-storm-watchdog --signals /path/to/run.log    # the two signals at EOF only — what a poll
+#                                                      # of that log RIGHT NOW would see, no walk
 #
 #   Env: STORM_WATCHDOG=off to disable · STORM_LOG=/tmp/run.log · STORM_THRESHOLD=10
 #        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
