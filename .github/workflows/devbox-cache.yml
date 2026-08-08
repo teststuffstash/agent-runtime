@@ -1,0 +1,34 @@
+# Publish this repo's devbox eval cache + nix store slice to ghcr, so a ride pod starts warm.
+# Thin caller → the reusable org workflow in homelab. See homelab FU-096/FU-130, stack-lint CACHE-01.
+#
+# Without it, every agent-runtime ride paid the cold nix evaluation the other repos skip: a measured
+# 16-minute first `unit` run against seconds warm. The launcher mounts the published artifact
+# read-only at /stack-cache (k8s ImageVolume) and agent-base/entrypoint.sh seeds ~/.cache from it.
+#
+# ⚠ The watched lock is the ROOT devbox.lock — the ride's own toolchain — NOT agent-base/devbox.lock,
+# which is the IMAGE's and belongs to build-image.yaml. The reusable builds from the root lock and
+# entrypoint.sh only seeds when the artifact's lock is byte-identical to it
+# (`cmp -s devbox.lock "$STACK_CACHE_DIR/devbox.lock"`), so a cache keyed to the image lock would
+# publish, go green, and be skipped on every ride without ever going red. tests/ pins that.
+#
+# Level-triggered on the lock itself, no `schedule:` — the reusable's header calls out the
+# runner-image lesson that cron offsets guarantee nothing about ordering. The lock changing IS the
+# event. Publishing is content-addressed (tag `lock-<sha256[0:12]>`), so a re-run on an unchanged
+# lock skips the build and leaves `:latest` pointing where it already points.
+name: devbox-cache
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - devbox.json
+      - devbox.lock
+      - .github/workflows/devbox-cache.yml
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    uses: teststuffstash/homelab/.github/workflows/devbox-cache.reusable.yml@master
+    permissions:
+      contents: read
+      packages: write

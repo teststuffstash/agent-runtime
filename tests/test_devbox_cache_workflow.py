@@ -33,6 +33,16 @@ def _text():
     return WORKFLOW.read_text(encoding="utf-8")
 
 
+def _directives(text):
+    """The source with comments stripped — what the Actions parser actually sees.
+
+    Needed because this caller's header explains, in prose, the very keys these tests assert are
+    absent (`schedule:`, `runs-on:`). Matching on raw text would fail a correct file for saying why
+    it is correct, and the pressure would be to delete the explanation.
+    """
+    return "\n".join(ln.split("#")[0].rstrip() for ln in text.splitlines())
+
+
 def _push_paths(text):
     """The `paths:` list of the push trigger, as written.
 
@@ -58,7 +68,7 @@ class TestThinCaller:
     """The caller declares intent; homelab's reusable owns how the cache is built and pushed."""
 
     def test_calls_the_homelab_reusable(self):
-        assert f"uses: {REUSABLE}" in _text()
+        assert f"uses: {REUSABLE}" in _directives(_text())
 
     def test_does_not_inline_the_build(self):
         """`runs-on` / `steps` here means the publish logic forked from the org's copy.
@@ -67,13 +77,13 @@ class TestThinCaller:
         owns the content-addressed `lock-<sha256[0:12]>` tagging. A caller that re-implements any
         of that drifts the moment the reusable changes, and nothing tells us.
         """
-        text = _text()
+        text = _directives(_text())
         assert "runs-on:" not in text
         assert "steps:" not in text
 
     def test_grants_packages_write(self):
         """No ghcr push without it — and `secrets: inherit` cannot supply a missing permission."""
-        assert re.search(r"^\s+packages:\s+write\s*$", _text(), re.M)
+        assert re.search(r"^\s+packages:\s+write\s*$", _directives(_text()), re.M)
 
 
 class TestTrigger:
@@ -102,14 +112,14 @@ class TestTrigger:
         nothing about ordering, so a ride can start against a cache built for the previous lock.
         The lock changing IS the event.
         """
-        assert "schedule:" not in _text()
+        assert "schedule:" not in _directives(_text())
 
     def test_keeps_the_manual_dispatch(self):
         """The first publish after merge is a hand-run — there is no lock change to ride in on."""
-        assert "workflow_dispatch" in _text()
+        assert "workflow_dispatch" in _directives(_text())
 
     def test_publishes_from_master_only(self):
         """A cache published from a PR head would key `:latest` to an unmerged lock."""
-        m = re.search(r"^\s+branches:\s*\[?\s*(.+?)\s*\]?\s*$", _text(), re.M)
+        m = re.search(r"^\s+branches:\s*\[?\s*(.+?)\s*\]?\s*$", _directives(_text()), re.M)
         assert m, "push trigger declares no branches"
         assert [b.strip().strip("\"'") for b in m.group(1).split(",")] == ["master"]
