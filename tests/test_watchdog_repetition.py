@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -205,3 +206,60 @@ class TestReplayIsFaithful:
         v = check(write(tmp_path, healthy(140) + [NAG] * 65))
         # 65 repeats in the live 200-line tail = 32%. A start-stepping walk reports 61% here.
         assert v.share == 32
+
+
+# The issue's own fixture: 233 healthy lines, then 40 identical ones (ending at line 273), then 500
+# more healthy ones. The burst never reaches EOF, so it is only scoreable at a window end inside it.
+BURST_TAIL_END = 273
+BURST_TRUNCATED = healthy(233) + [NAG] * 40
+BURST = BURST_TRUNCATED + healthy(500, offset=273)
+
+
+def tail_at(out):
+    """The line number `--check` attributes its tightest tail to."""
+    m = re.search(r"tightest tail: \d+ distinct at line (\d+)", out)
+    assert m, f"--check must report where the tightest tail sits, got:\n{out}"
+    return int(m.group(1))
+
+
+class TestNoBurstHidesBetweenSamples:
+    """#43. The walk scores window ENDS, so a burst is seen only if some scored end lands on it —
+    and the tail signal's landing zone is TINY. A verdict of ≤3 distinct needs almost all of the
+    tail's 40 non-blank lines inside the burst, so the shortest scoreable burst (exactly
+    `REPEAT_TAIL` lines) is visible from about five line-ends and no more. Stepping
+    `REPEAT_WINDOW/4` = 50 walks straight over it; so would a step of `REPEAT_TAIL` = 40, or any
+    other coarse step. Only scoring every end is faithful.
+
+    Why this is the failure worth a test: `--check` is what a human replays a saved log through when
+    arguing about a post-mortem, and a false CLEAR there is the harder direction to notice — nobody
+    re-derives a `would not kill`. The same log truncated where the burst ends reads WOULD KILL,
+    which is the contradiction the issue opened on.
+    """
+
+    def test_mid_log_burst_is_scored(self, tmp_path):
+        """The burst at lines 234-273 sits between the old samples (200, 250, 300, …) and was lost."""
+        v = check(write(tmp_path, BURST))
+        assert v.distinct == 1, "the 40 identical lines collapse to one distinct line"
+        assert tail_at(v.out) == BURST_TAIL_END
+        assert v.kill
+        assert v.share < 50, "the tail signal is the one that must fire — 40 of 200 lines is 20%"
+
+    def test_agrees_with_the_same_log_truncated_at_the_burst(self, tmp_path):
+        """`--check` reports the WORST view over the walk, so appending healthy lines after a burst
+        can never soften the verdict — the truncated log's number must still be reachable."""
+        trunc = tmp_path / "trunc"
+        trunc.mkdir()
+        assert check(write(trunc, BURST_TRUNCATED)).distinct == check(write(tmp_path, BURST)).distinct
+
+    def test_walk_does_not_re_scan_the_log_per_step(self, tmp_path):
+        """The other half of the same edit. The shipped walk re-sliced the whole file TWICE per
+        window end (~12s on this 52k-line log), so scoring more ends multiplies a cost that was
+        already the reviewer's complaint on #42; one pass over the log pays for the fidelity above.
+
+        The bound is deliberately loose — it fails when per-step re-scanning comes back, not when
+        the runner is busy.
+        """
+        t0 = time.monotonic()
+        v = check(write(tmp_path, healthy(52_000)))
+        assert time.monotonic() - t0 < 5.0, "the walk is re-reading the log per window end again"
+        assert not v.kill
