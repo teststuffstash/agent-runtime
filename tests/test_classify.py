@@ -4,13 +4,16 @@ This is the function the ledger, the model-strike machinery and the router all k
 verdict here is not cosmetic: it decides whether a model gets struck and whether the coordinator
 re-dispatches. Every case below is drawn from a run that actually happened; the docstrings name it.
 """
-import pytest
-
 TRUNCATION_LOG = (
     "reading the spec\n"
     "-32602: Could not interpret tool use parameters for id chatcmpl-tool-9da57cd:\n"
     "EOF while parsing a string at line 1 column 6129 — the response may have been truncated.\n"
 )
+
+# What a run that reached its own end leaves in the log: the recipe's structured final report.
+# parse_outcome() lifts it into stats, which is how finalize knows the round finished rather than
+# stopped existing. Kept next to TRUNCATION_LOG because the pair is the whole #36 distinction.
+REPORTED_END = {"reproduced": True, "ci_passed": True, "branch": "fix/issue-1-x"}
 
 
 def test_import_is_side_effect_free(af):
@@ -109,16 +112,51 @@ class TestDerivedPrUrlMasksDeath:
             "goose-32602-truncation",
         )
 
-    @pytest.mark.xfail(
-        reason="agent-runtime#36: a derived pr_url masks the death. Remove the xfail with the fix.",
-        strict=True,
-    )
     def test_fix_round_truncation_must_still_strike(self, af, logfile):
         """r3's shape: same log, but a pre-existing PR — must NOT read clean.
 
-        `strict=True` on purpose: when #36 is fixed this test starts PASSING and the xfail itself
-        fails the suite, which is the signal to delete the marker. A test that silently keeps
-        passing-as-expected-failure is how a fixed bug gets re-broken unnoticed.
+        Pinned by a strict xfail until the fix landed; the marker is gone now, and this is the
+        case that must never regress: the round died without reporting an end, so the PR it left
+        behind belongs to an EARLIER round and says nothing about this one.
         """
         s, e = af.classify(logfile(TRUNCATION_LOG), {"pr_url": "http://x/39"})
         assert (s, e) == ("harness-death", "goose-32602-truncation")
+
+    def test_salvage_derived_pr_url_does_not_mask_an_auth_death(self, af, logfile):
+        """The second live shape (2026-08-07, deepseek/deepseek-v4-flash on circles).
+
+        The harness died on an AUTH circuit-open (proxy 4×401 → forwarding stopped), retry-spun for
+        ~58 min, and the launcher's salvage recovered the branch — so the derived PR (circles#58)
+        came from the SALVAGE, not from a round that opened it. Same masking, different signature:
+        the fix has to be about the death, not about which door the pr_url came in through.
+        """
+        s, e = af.classify(logfile("401 unauthorized\n" * 6), {"pr_url": "http://x/58"})
+        assert (s, e) == ("auth-storm", "http-401-storm")
+
+    def test_a_round_that_reported_its_own_end_is_still_clean(self, af, logfile):
+        """The other direction, and the reason "any signature anywhere" is NOT the rule.
+
+        A run that finished and emitted its structured report did not die — its log merely
+        CONTAINS the strings. This suite is the live example: a ride fixing this repo runs pytest
+        over the fixtures above, so `-32602` and `401 unauthorized` are in every green run.log
+        here. Flipping those into a strike would trade #36's silent death for a fabricated one.
+        """
+        log = TRUNCATION_LOG + "401 unauthorized\n" * 6
+        s, e = af.classify(logfile(log), dict(REPORTED_END, pr_url="http://x/1"))
+        assert (s, e) == ("clean", "")
+
+    def test_a_reported_end_with_red_ci_is_still_ci_failed(self, af, logfile):
+        """Same guard on the ci-red branch: the recipe's own verdict still routes the run."""
+        s, e = af.classify(logfile(TRUNCATION_LOG),
+                           {"pr_url": "http://x/1", "ci_passed": False, "reproduced": True})
+        assert (s, e) == ("ci-failed", "ci-red")
+
+    def test_a_dead_git_token_never_contradicts_an_existing_pr(self, af, logfile):
+        """`no-artifact`/token-expiry is a claim ABOUT the artifact, not about the session.
+
+        With a PR in hand it would be a lie, so it is the one signature that must not override
+        success — the override is for deaths only.
+        """
+        log = "fatal: could not read Username for 'https://github.com'\n"
+        s, e = af.classify(logfile(log), {"pr_url": "http://x/1", "ci_passed": True})
+        assert (s, e) == ("clean", "")
