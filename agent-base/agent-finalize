@@ -374,11 +374,18 @@ def salvage_push(stats):
     TICK-LOG 2026-07-09): this is the mechanism that replaces the exhortation. Best-effort.
     MUST run before derive_pr_url: the pr_url guard below is about the recipe's SELF-report (PR
     opened this round → nothing to salvage); a derived pr_url can come from an OLDER still-open PR
-    on a resumed branch, and skipping on that would silently drop this round's commits."""
+    on a resumed branch, and skipping on that would silently drop this round's commits.
+
+    Sets `salvaged_branch` when a push lands, and `salvage_undetermined` when the branch state
+    could not be established (#33) — the strike comment must not turn "I could not tell" into
+    "there is nothing to resume"."""
     if stats.get("pr_url"):
         return
     wd, base, branch = _resolve_branch()
     if branch is None:
+        # No repo, detached HEAD, or still sitting on the base branch — none of which finalize can
+        # tell apart from "the work is elsewhere". Unknown, not "nothing was committed" (#33).
+        stats["salvage_undetermined"] = True
         return
 
     def git(*args, timeout=60):
@@ -390,18 +397,81 @@ def salvage_push(stats):
             git("add", "-A")
             git("commit", "-m", "wip(salvage): uncommitted state at terminal [agent-finalize]")
         ahead = git("rev-list", "--count", "origin/%s..HEAD" % base).stdout.strip()
-        if not ahead.isdigit() or int(ahead) == 0:
+        if not ahead.isdigit():
+            stats["salvage_undetermined"] = True  # rev-list failed: ahead-ness unknown, not zero
             return
+        if int(ahead) == 0:
+            return  # the honest "nothing was committed": on a work branch, zero commits ahead
         # --force-with-lease: the branch may exist remotely from a prior attempt of the same round.
         pushed = git("push", "--force-with-lease", "-u", "origin", branch, timeout=120)
         if pushed.returncode == 0:
             stats["salvaged_branch"] = branch
             print("salvage: pushed %s (%s commits ahead of %s)" % (branch, ahead, base), flush=True)
         else:
+            stats["salvage_undetermined"] = True  # commits exist here; the remote's state is unknown
             print("salvage: push FAILED for %s: %s (non-fatal)"
                   % (branch, pushed.stderr.strip()[-300:]), file=sys.stderr)
     except Exception as e:
+        stats["salvage_undetermined"] = True
         print("salvage: non-fatal error: %s" % e, file=sys.stderr)
+
+
+def resumable_branch(stats, env=None):
+    """"Is there anything to resume for THIS ISSUE?" — the question the coordinator is actually
+    asking when it reads the strike comment (agent-runtime#33).
+
+    Finalize used to answer the round-scoped question instead (`salvaged_branch`, set only when
+    this round pushed). The two agree on round 1 and diverge on every resumed round that fails —
+    circles#22 r2 resumed a branch holding the entire deliverable (1 commit, +1051), committed
+    nothing new, and was reported as having no resumable branch, so the next dispatch would restart
+    from base and discard it.
+
+    Two in-pod sources, both already known — deliberately NOT a scan of remote `agent/*` branches,
+    which is how the wrong branch gets resumed:
+
+      1. `salvaged_branch` — this round pushed it, so it exists. Reported as "pushed": strongest
+         and most recent, and it is the branch HEAD was actually on.
+      2. `WORK_BRANCH` in the environment — the launcher set it iff the ride was dispatched with
+         `--work-branch` (the entrypoint's own fallback name is a plain shell var, never exported),
+         so a value here means the branch existed on entry and still exists.
+
+    Returns (kind, branch) with kind in:
+      "pushed"   — this round pushed `branch`
+      "resuming" — `branch` was dispatched to this round and gained no new commits
+      "unknown"  — salvage could not establish the branch state; NOT a "no" (#33 keeps the failure
+                   direction: a false "nothing to resume" loses work, a false "resumable" costs a
+                   checkout)
+      "none"     — finalize positively knows nothing was banked
+    """
+    env = os.environ if env is None else env
+    pushed = (stats.get("salvaged_branch") or "").strip()
+    if pushed:
+        return "pushed", pushed
+    dispatched = (env.get("WORK_BRANCH") or "").strip()
+    if dispatched:
+        return "resuming", dispatched
+    if stats.get("salvage_undetermined"):
+        return "unknown", None
+    return "none", None
+
+
+def resumable_note(stats, env=None):
+    """The resumable-branch sentence for the strike comment. The cases stay distinguishable —
+    "resuming `B` (no new commits)" is materially different from "pushed `B`", and the coordinator
+    play acts on the distinction (#33)."""
+    kind, branch = resumable_branch(stats, env)
+    if kind == "pushed":
+        return ("\n\n**Resumable branch pushed:** `%s` — the next round can resume from it (C5), "
+                "not restart." % branch)
+    if kind == "resuming":
+        return ("\n\n**Resumable branch:** `%s` — this round resumed it and added no new commits, "
+                "so it still holds the work banked by earlier rounds. The next round must resume "
+                "from it (C5), not restart from base." % branch)
+    if kind == "unknown":
+        return ("\n\n(resumable branch **unknown** — salvage could not establish the branch state; "
+                "this is not a statement that none exists. Check the run log before restarting "
+                "from base.)")
+    return "\n\n(no resumable branch — nothing was committed)"
 
 
 def derive_pr_url(stats):
@@ -576,10 +646,10 @@ def bookkeeping(stats, log_path):
                 os.environ.get("MODEL") or stats.get("model", "?"), err,
                 os.environ.get("AGENT_ROUND", "1"), stats.get("pod", "?"),
             )
-            salvage_note = (
-                "\n\n**Resumable branch pushed:** `%s` — the next round can resume from it (C5), "
-                "not restart." % stats["salvaged_branch"]
-            ) if stats.get("salvaged_branch") else "\n\n(no resumable branch — nothing was committed)"
+            # Issue-scoped, not round-scoped (#33): the coordinator reads this to decide whether to
+            # re-dispatch with --work-branch, so a resumed round that committed nothing must still
+            # name the branch it resumed.
+            salvage_note = resumable_note(stats)
             body = "%s%s\n\n<details><summary>last 15 log lines (%s)</summary>\n\n~~~text\n%s~~~\n\n</details>\n" % (
                 strike, salvage_note, stats.get("pod", "?"), _last_lines(log_path))
             posted = gh("issue", "comment", issue, "--repo", slug, "--body", body)
