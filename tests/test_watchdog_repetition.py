@@ -26,6 +26,8 @@ import subprocess
 import time
 from typing import NamedTuple
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WATCHDOG = ROOT / "agent-base" / "agent-storm-watchdog"
 
@@ -107,6 +109,24 @@ def check(path, **env):
     distinct = re.search(r"tightest tail: (\d+) distinct", r.stdout)
     assert share and distinct, f"--check must report both signals, got:\n{r.stdout}"
     return Verdict(int(share.group(1)), int(distinct.group(1)), "WOULD KILL" in r.stdout, r.stdout)
+
+
+def signals(path, **env):
+    """The LIVE poll's two numbers at EOF, through the three shipped shell helpers.
+
+    `--check` no longer shells those helpers per sample — it re-expresses them in one awk pass (#43)
+    — so this is the seam that keeps the two from drifting apart.
+    """
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("STORM_")}
+    r = subprocess.run(
+        ["bash", str(WATCHDOG), "--signals", str(path)],
+        capture_output=True, text=True, env={**clean, **env},
+    )
+    assert r.returncode == 0, f"--signals failed: {r.returncode}\n{r.stdout}\n{r.stderr}"
+    share = re.search(r"share: (\d+)", r.stdout)
+    distinct = re.search(r"distinct: (\d+)", r.stdout)
+    assert share and distinct, f"--signals must report both, got:\n{r.stdout}"
+    return int(share.group(1)), int(distinct.group(1))
 
 
 class TestSlowLoopsAreCaught:
@@ -263,3 +283,45 @@ class TestNoBurstHidesBetweenSamples:
         v = check(write(tmp_path, healthy(52_000)))
         assert time.monotonic() - t0 < 5.0, "the walk is re-reading the log per window end again"
         assert not v.kill
+
+
+# Logs SHORTER than REPEAT_WINDOW, where the walk scores exactly one position — EOF — so `--check`
+# and the live helpers must print the same pair of numbers or one of them is wrong.
+SHORT_LOGS = {
+    "healthy": healthy(150),
+    "loop": healthy(5) + [NAG] * 40,
+    "half_blank": [x for line in healthy(60) for x in (line, "")],
+    "barely_started": ["agent-session: starting ride (round 1)"] * 12,
+    "untrimmed": [f"  {line}\t" for line in healthy(80)] + ["   ", "\t\t"],
+}
+
+
+class TestReplayMatchesTheLiveArithmetic:
+    """The structural guarantee that #43 traded away, restored as a test.
+
+    Until now `--check` COULD not drift from the live rule, because it shelled the same three
+    helpers per sample. That is precisely what made it too slow to sample finely, so the walk is now
+    one awk pass that re-states them — trim, drop blanks, share of the last 200 raw lines, distinct
+    of the last 40 non-blank ones, and both guards. Two implementations of one rule need a test
+    holding them together, or the replay quietly stops describing the thing that kills rides.
+    """
+
+    @pytest.mark.parametrize("shape", sorted(SHORT_LOGS))
+    def test_same_numbers_as_the_live_helpers(self, tmp_path, shape):
+        p = write(tmp_path, SHORT_LOGS[shape])
+        v = check(p)
+        assert (v.share, v.distinct) == signals(p)
+
+    def test_a_sparse_log_is_unjudgeable_in_both(self, tmp_path):
+        """40 identical lines spread one per 30 raw lines. `tail -n 1000` reaches only 33 of them,
+        so `_distinct` refuses to judge (999) — and the walk must refuse identically. Dropping that
+        guard while porting to awk would report 1 distinct and kill a log the live rule cannot see.
+        """
+        sparse = []
+        for _ in range(40):
+            sparse += [NAG] + [""] * 29
+        p = write(tmp_path, sparse)
+        v = check(p)
+        assert v.distinct == 999
+        assert not v.kill
+        assert signals(p)[1] == 999
