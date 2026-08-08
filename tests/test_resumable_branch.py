@@ -103,6 +103,76 @@ class TestStrikeNote:
         assert "no resumable branch" in af.resumable_note({}, env={})
 
 
+class TestDeliberateStopReport:
+    """The SECOND consumer of the same answer: the `blocked-deliberate` report (#33 round 2).
+
+    `bookkeeping()` posts two different issue comments and the coordinator reads both to decide
+    whether to re-dispatch with `--work-branch`. The strike comment was fixed above; this report
+    inlined the round-scoped `stats["salvaged_branch"]` check, so circles#22 r2 reaches the same
+    data loss through the other door — and worse: on an unset `salvaged_branch` it appended NOTHING,
+    and the coordinator acts on the line's PRESENCE, so an omitted line and a false
+    "(no resumable branch)" produce the identical decision — fork from base, discard the branch.
+
+    The body is built by a pure function so this stays hermetic — no `gh`, no network. The report's
+    *wording* may differ from the strike's (a deliberate stop is not a strike); the *answer* may not.
+    """
+
+    LOG = "…tail…\n"
+
+    def test_resumed_round_that_stopped_deliberately_names_the_branch(self, af):
+        """The acceptance case from #33 round 2: dispatched with B, stopped deliberately, no
+        commit → the report names B."""
+        body = af.deliberate_stop_body({}, self.LOG, env={"WORK_BRANCH": "agent/20260805-130300"})
+        assert "agent/20260805-130300" in body
+        assert "no resumable branch" not in body
+
+    def test_the_none_case_is_said_out_loud_not_omitted(self, af):
+        """Silence is not safer than a false negative when the consumer treats absence as "none"."""
+        body = af.deliberate_stop_body({}, self.LOG, env={})
+        assert "no resumable branch" in body
+
+    def test_pushed_round_still_reports_the_push(self, af):
+        body = af.deliberate_stop_body({"salvaged_branch": "agent/b"}, self.LOG, env={})
+        assert "pushed" in body.lower()
+        assert "agent/b" in body
+
+    def test_undetermined_never_asserts_there_is_none(self, af):
+        """Failure direction survives on this path too: an unknown is not a "no"."""
+        body = af.deliberate_stop_body({"salvage_undetermined": True}, self.LOG, env={})
+        assert "unknown" in body.lower()
+        assert "no resumable branch" not in body
+
+    @pytest.mark.parametrize("stats,env", [
+        ({}, {"WORK_BRANCH": "agent/b"}),
+        ({"salvaged_branch": "agent/b"}, {}),
+        ({"salvage_undetermined": True}, {}),
+        ({}, {}),
+    ])
+    def test_one_source_for_both_call_sites(self, af, stats, env):
+        """The point of the round-2 fix: this report does not re-derive the answer, it shares it.
+
+        A second inlined check that happens to agree today is what produced this bug the first time.
+        """
+        assert af.resumable_note(stats, env=env) in af.deliberate_stop_body(stats, self.LOG, env=env)
+
+    def test_the_report_still_says_what_it_always_said(self, af):
+        """Guard the extraction: the coordinator matches `AGENT_REPORT: deliberate stop` and reads
+        model/round/pod and the log tail out of this body."""
+        body = af.deliberate_stop_body(
+            {"pod": "agent-pod-1", "model": "stats-model"}, self.LOG,
+            env={"MODEL": "env-model", "AGENT_ROUND": "3"})
+        assert body.startswith("AGENT_REPORT: deliberate stop")
+        assert "model=env-model" in body      # the pod's MODEL wins over the parsed one, as before
+        assert "round=3" in body
+        assert "session=agent-pod-1" in body
+        assert self.LOG in body
+
+    def test_model_falls_back_to_the_parsed_stats_value(self, af):
+        body = af.deliberate_stop_body({"model": "stats-model"}, self.LOG, env={})
+        assert "model=stats-model" in body
+        assert "round=1" in body  # the unset-AGENT_ROUND default, unchanged
+
+
 class TestSalvageMarksUnknown:
     """`salvage_push` is what knows a branch could not be confirmed — it must record that.
 
