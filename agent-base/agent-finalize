@@ -658,10 +658,254 @@ def _last_lines(log_path, count=15):
         return ""
 
 
+# ── ADR-103 leg 2: the machine channels (homelab#210 / agent-runtime#62) ──────────────────────
+# Every machine event used to be another PR comment — "picking this up (round N)", the run-stats
+# table, the strike — so a three-round ride buried the human review under machine residue, and the
+# coordinator's round counter rode on "one round = one more comment", which anything else
+# commenting broke. Two channels replace that:
+#   - the `agent-ride` CHECK-RUN carries the run-stats table (markdown output, checks tab);
+#   - ONE `<!-- agent-summary -->` comment per timeline carries a one-line index entry per event,
+#     APPENDED in place.
+# The homelab twin (PR #219, `agents/machine-comment.sh`, merged 2026-08-09) is the reference
+# implementation and already emits these shapes from the launcher's fallback leg. These are the
+# same bytes, reimplemented — they are the machine interface, not cosmetics.
+SUMMARY_MARKER = "<!-- agent-summary -->"
+SUMMARY_HEADER = (
+    SUMMARY_MARKER + "\n"
+    "\U0001f916 **Agent activity** — one machine comment per timeline, appended in place "
+    "(ADR-103). Run detail lives in the `agent-ride` check-run, the ledger and "
+    "`s3://agent-transcripts/`; this is the index."
+)
+CHECK_RUN_NAME = "agent-ride"
+
+
+def _utc_now_iso():
+    """The event timestamp. A seam, not a convenience: the behaviour fixtures pass `now` in, so
+    the recorded world has no wall clock (deliverable 4)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def summary_event_line(markdown, kind, ts, fold=None):
+    """One appended index entry, byte-identical to the launcher's.
+
+    ⚠ `kind=stats` is LOAD-BEARING: `agents/coordinator-scan.sh` counts
+    `<!-- agent-event kind=stats ts=([^ ]+) -->` inside the summary comment as the ROUND COUNTER,
+    now that "one round = one more comment" is false. A different kind string or a missing marker
+    silently pins ci-red `attempts` at 0 — the red-loop livelock `RED_ROUNDS_MAX` exists to bound.
+
+    `fold` carries the run-stats table when the check-run was refused (App-token-only endpoint):
+    it rides INSIDE this one entry as an indented list continuation — never as a second comment,
+    which would undo the whole change. The marker stays on the FIRST physical line so the scan's
+    line-oriented grep is unaffected.
+    """
+    line = "- `%s` · %s <!-- agent-event kind=%s ts=%s -->" % (ts, markdown, kind, ts)
+    if fold:
+        table = "\n".join(("  " + ln) if ln.strip() else "" for ln in fold.rstrip("\n").split("\n"))
+        line += ("\n  <details><summary>run stats (check-run unavailable — App-token-only "
+                 "endpoint)</summary>\n\n%s\n\n  </details>" % table)
+    return line
+
+
+def parse_comment_pages(text):
+    """`gh api --paginate` output → a flat list of comments, or None when it is UNREADABLE.
+
+    None is the fail-closed signal (rule #6, the probe-fails-into-a-value class): an empty or
+    non-array payload is not an empty timeline, and a caller that treated it as one would create a
+    second summary comment on every event — precisely the residue this work removes. `--paginate`
+    concatenates one JSON array per page, so decode until the text runs out.
+    """
+    text = text or ""
+    dec = json.JSONDecoder()
+    out, i, decoded_a_page = [], 0, False
+    while i < len(text):
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            break
+        try:
+            page, i = dec.raw_decode(text, i)
+        except ValueError:
+            return None
+        if not isinstance(page, list):
+            return None  # an API error object ({"message": "Not Found"}) is not a timeline
+        out.extend(page)
+        decoded_a_page = True
+    return out if decoded_a_page else None
+
+
+def summary_pick(comments):
+    """The find half of find-or-create: the OLDEST `<!-- agent-summary -->` comment, or None.
+
+    Oldest, not newest: a race — or a human pasting the marker — must converge back onto the FIRST
+    comment instead of alternating between two.
+    """
+    marked = [c for c in comments
+              if isinstance(c, dict) and SUMMARY_MARKER in (c.get("body") or "")]
+    if not marked:
+        return None
+    marked.sort(key=lambda c: (str(c.get("created_at") or ""), str(c.get("id") or "")))
+    return marked[0]
+
+
+def post_summary_event(gh, slug, issue, markdown, kind, ts, fold=None):
+    """Find-or-create the single summary comment and APPEND one event line. True when it landed.
+
+    REST only (`repos/{slug}/issues/{n}/comments`) — a PR's conversation comments ARE issue
+    comments, so one endpoint serves both sides, and the id this returns is the REST-numeric `.id`
+    the PATCH needs (a GraphQL node id 404s that endpoint).
+
+    APPEND, never replace: replacing would erase round 1's `kind=stats` marker and hand the
+    coordinator's counting clause a permanent `attempts=1`.
+
+    Never fatal — this is bookkeeping, and no ride may lose real work over a refused comment.
+    """
+    line = summary_event_line(markdown, kind, ts, fold)
+    listed = gh("api", "--paginate", "repos/%s/issues/%s/comments" % (slug, issue))
+    if listed.returncode != 0:
+        print("summary-comment: timeline read FAILED: %s — creating NOTHING (fail closed)"
+              % listed.stderr.strip()[-200:], file=sys.stderr)
+        return False
+    comments = parse_comment_pages(listed.stdout)
+    if comments is None:
+        print("summary-comment: timeline unreadable (no JSON array in %d bytes of gh output) — "
+              "creating NOTHING (fail closed; a create here would mint a second summary comment)"
+              % len(listed.stdout or ""), file=sys.stderr)
+        return False
+    target = summary_pick(comments)
+    if target is None:
+        wrote = gh("api", "--method", "POST", "repos/%s/issues/%s/comments" % (slug, issue),
+                   "--input", "-", stdin=json.dumps({"body": SUMMARY_HEADER + "\n\n" + line}))
+        what = "created"
+    else:
+        body = (target.get("body") or "").rstrip("\n") + "\n" + line
+        wrote = gh("api", "--method", "PATCH",
+                   "repos/%s/issues/comments/%s" % (slug, target.get("id")),
+                   "--input", "-", stdin=json.dumps({"body": body}))
+        what = "appended to comment %s" % target.get("id")
+    if wrote.returncode != 0:
+        print("summary-comment: %s FAILED: %s (non-fatal)" % (what, wrote.stderr.strip()[-200:]),
+              file=sys.stderr)
+        return False
+    print("summary-comment: %s (kind=%s)" % (what, kind), flush=True)
+    return True
+
+
+def check_run_payload(head_sha, task, table):
+    """The `agent-ride` check-run body. `neutral` is deliberate: an informational check must never
+    colour mergeability, and this is not a required context."""
+    return {
+        "name": CHECK_RUN_NAME,
+        "head_sha": head_sha,
+        "status": "completed",
+        "conclusion": "neutral",
+        "output": {"title": "agent ride — %s" % (task or "adhoc"), "summary": table},
+    }
+
+
+def post_check_run(gh, slug, pr_url, task, table):
+    """POST the run-stats table as the `agent-ride` check-run on the PR head sha.
+
+    False (never an exception) when it could not be posted — check-runs are an App-token-only
+    endpoint, so a classic PAT 403s here whatever its scopes; the caller degrades by folding the
+    table into the summary line. The head sha is asked of GitHub rather than of the local checkout:
+    a guessed sha attaches the check to nothing.
+    """
+    head = gh("pr", "view", pr_url, "--json", "headRefOid", "--jq", ".headRefOid")
+    sha = head.stdout.strip() if head.returncode == 0 else ""
+    if not sha:
+        print("check-run: head sha unreadable (%s) — no check-run (table folds into the summary "
+              "line)" % (head.stderr.strip()[-160:] or "empty"), file=sys.stderr)
+        return False
+    posted = gh("api", "--method", "POST", "repos/%s/check-runs" % slug, "--input", "-",
+                stdin=json.dumps(check_run_payload(sha, task, table)))
+    if posted.returncode != 0:
+        print("check-run: POST refused: %s — folding the table into the summary line "
+              "(App-token-only endpoint)" % posted.stderr.strip()[-200:], file=sys.stderr)
+        return False
+    print("check-run: %s posted on %s" % (CHECK_RUN_NAME, sha[:12]), flush=True)
+    return True
+
+
+def _cost_cell(stats):
+    """The one cost expression, shared by the table and the index line."""
+    if "cost_usd" in stats:
+        return "$%s" % stats["cost_usd"]
+    if stats.get("subscription"):
+        return "subscription — %s turns, %s in (+%s cached) / %s out tok" % (
+            stats.get("turns", "?"), stats.get("tokens_in", "?"),
+            stats.get("tokens_cache_read", 0), stats.get("tokens_out", "?"))
+    return "unknown (key unreadable)"
+
+
+def run_stats_table(stats, task):
+    """The run-stats markdown table — the payload that used to BE a PR comment and is now the
+    check-run's output summary. Unchanged bytes (transcripts pointer + cost line included); only
+    the channel moved, and the ledger/S3 copy is untouched either way."""
+    return (
+        "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
+        "| metric | value |\n|---|---|\n"
+        "| model | `%s` (%s) |\n"
+        "| cost | %s |\n"
+        "| duration | %ss |\n"
+        "| ci_passed | %s |\n"
+        "| exit / error_class | `%s` / `%s` |\n"
+        "| node / pod | `%s` / `%s` |\n\n"
+        "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
+    ) % (
+        stats.get("model", "?"), stats.get("harness", "?"), _cost_cell(stats),
+        stats.get("duration_s", 0), stats.get("ci_passed", "?"),
+        stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
+        stats.get("node", "?"), stats.get("pod", "?"),
+        stats.get("project", "?"), task or "adhoc",
+    )
+
+
+def _pr_number(pr_url):
+    m = re.search(r"/pull/(\d+)", pr_url or "")
+    return m.group(1) if m else ""
+
+
+def _slug_from_pr_url(pr_url):
+    m = re.match(r"https://github\.com/([^/]+/[^/]+)/pull/\d+", pr_url or "")
+    return m.group(1) if m else ""
+
+
+def emit_run_stats(gh, stats, task, slug, now=None):
+    """The stats channel: table → `agent-ride` check-run, one index line → the summary comment.
+
+    Sets `stats_comment_by_pod` ONLY on a real ADR-103 emission, because that flag is a
+    SUPPRESSION CONTRACT with the merged launcher: `agents/agent-session.sh` skips its ENTIRE
+    fallback bookkeeping leg when `armed_by_pod` and `stats_comment_by_pod` are both true. Setting
+    it while posting the OLD table is the bug this fixes — it suppressed the launcher's new-shape
+    leg, so a real ride produced the old residue and no check-run at all. Left UNSET when the
+    emission failed, which means "the pod never got to it" and lets the fallback post the stats.
+    """
+    pr_url = stats.get("pr_url") or ""
+    slug = slug or _slug_from_pr_url(pr_url)  # REPO_URL is launcher-injected; the PR URL is not
+    issue = _pr_number(pr_url)
+    if not (slug and issue):
+        print("stats: no repo slug / PR number (%r) — stats channel skipped, launcher fallback "
+              "posts" % pr_url, file=sys.stderr)
+        return False
+    table = run_stats_table(stats, task)
+    on_check_run = post_check_run(gh, slug, pr_url, task, table)
+    index = "**run stats (round %s)** — model `%s` · exit `%s` · %s · %ss" % (
+        os.environ.get("AGENT_ROUND", "1"), stats.get("model", "?"),
+        stats.get("exit_status", "?"), _cost_cell(stats), stats.get("duration_s", 0))
+    if on_check_run:
+        index += " — detail in the `%s` check-run." % CHECK_RUN_NAME
+    emitted = post_summary_event(gh, slug, issue, index, "stats", now or _utc_now_iso(),
+                                 fold=None if on_check_run else table)
+    if emitted:
+        stats["stats_comment_by_pod"] = True
+    return emitted
+
+
 def bookkeeping(stats, log_path):
     """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR from a round that ENDED — arm
     auto-merge (an un-armed PR is invisible to the ENTIRE merge path: updater, review reflex,
-    GitHub auto-merge) + post the stats comment; otherwise — post the AGENT_STRIKE comment to the
+    GitHub auto-merge) + emit the stats channels (ADR-103: the `agent-ride` check-run + one
+    appended summary line, #62); otherwise — post the AGENT_STRIKE comment to the
     issue (that comment IS the strike store the coordinator walks the model chain by; keep the
     first line's format STABLE). Sets *_by_pod flags in stats so the launcher's fallback skips what
     already happened.
@@ -674,8 +918,11 @@ def bookkeeping(stats, log_path):
         return
     env = _fresh_gh_env()
 
-    def gh(*args, timeout=30):
-        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout, env=env)
+    def gh(*args, timeout=30, stdin=None):
+        # stdin feeds `gh api --input -`: the check-run payload is a nested object, which no
+        # combination of -f/-F expresses portably across gh versions.
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout,
+                              env=env, input=stdin)
 
     pr_url = stats.get("pr_url") or ""
     route = bookkeeping_route(stats)
@@ -697,7 +944,7 @@ def bookkeeping(stats, log_path):
                 # The flag is set FALSE, not left unset: unset means "the pod never got to it" and
                 # the launcher's fallback arms it, which would undo this decision one layer up.
                 stats["armed_by_pod"] = False
-                print("bookkeeping: arming + stats comment SKIPPED (exit_status=%s — THIS ROUND "
+                print("bookkeeping: arming + stats channel SKIPPED (exit_status=%s — THIS ROUND "
                       "died; the PR is an earlier round's artifact). Striking instead."
                       % (stats.get("exit_status") or "?"), flush=True)
             elif os.environ.get("AGENT_ARM_PR", "1") == "0":
@@ -751,31 +998,11 @@ def bookkeeping(stats, log_path):
                     print("bookkeeping: issue-link step errored: %r (non-fatal)" % exc,
                           file=sys.stderr)
             if route == "arm":
-                body = (
-                    "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
-                    "| metric | value |\n|---|---|\n"
-                    "| model | `%s` (%s) |\n"
-                    "| cost | %s |\n"
-                    "| duration | %ss |\n"
-                    "| ci_passed | %s |\n"
-                    "| exit / error_class | `%s` / `%s` |\n"
-                    "| node / pod | `%s` / `%s` |\n\n"
-                    "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
-                ) % (
-                    stats.get("model", "?"), stats.get("harness", "?"),
-                    ("$%s" % stats["cost_usd"]) if "cost_usd" in stats
-                    else ("subscription — %s turns, %s in (+%s cached) / %s out tok" % (
-                        stats.get("turns", "?"), stats.get("tokens_in", "?"),
-                        stats.get("tokens_cache_read", 0), stats.get("tokens_out", "?"),
-                    )) if stats.get("subscription") else "unknown (key unreadable)",
-                    stats.get("duration_s", 0), stats.get("ci_passed", "?"),
-                    stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
-                    stats.get("node", "?"), stats.get("pod", "?"),
-                    stats.get("project", "?"), task or "adhoc",
-                )
-                commented = gh("pr", "comment", pr_url, "--body", body)
-                if commented.returncode == 0:
-                    stats["stats_comment_by_pod"] = True
+                # ADR-103 leg 2 (#62): the table is the `agent-ride` check-run and the PR gets ONE
+                # appended index line — no more `gh pr comment` per round. `stats_comment_by_pod`
+                # is set inside, and only on a real emission (it suppresses the launcher's
+                # new-shape fallback leg).
+                emit_run_stats(gh, stats, task, slug)
         # Not `elif`: a died round reaches BOTH legs — the PR above still gets its issue link, and
         # the strike below is the whole point of #49.
         if route != "arm" and task.startswith("issue-") and slug:
