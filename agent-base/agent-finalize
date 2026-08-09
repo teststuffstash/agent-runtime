@@ -211,13 +211,26 @@ def _log_text(log_path):
         return ""
 
 
+def _marker_path():
+    """Where agent-storm-watchdog leaves its verdict, resolved EXACTLY as the watchdog resolves it:
+    AGENT_WATCHDOG_MARKER (canonical), then the legacy STORM_MARKER, then the shipped default. The
+    watchdog used to read only STORM_MARKER here, so overriding either name alone moved one side and
+    the verdict landed in a file this never opened — silently, since the defaults agree (#46).
+    `agent-storm-watchdog --marker` prints that side's answer for a test to pin against this one."""
+    return (
+        os.environ.get("AGENT_WATCHDOG_MARKER")
+        or os.environ.get("STORM_MARKER")
+        or "/tmp/agent-watchdog-class"
+    )
+
+
 def _watchdog_class():
     """The watchdog's verdict, when it killed this run (#13). It writes a marker BEFORE the SIGTERM
     because the signal alone is indistinguishable from any other kill — the run would land as
     nonzero-exit-143, which says "someone stopped it" and nothing about why. Read the file, not the
     exit code. Absent marker = the watchdog didn't fire; this stays out of the way entirely."""
     try:
-        with open(os.environ.get("AGENT_WATCHDOG_MARKER", "/tmp/agent-watchdog-class")) as fh:
+        with open(_marker_path()) as fh:
             return fh.read().strip()[:40]
     except Exception:
         return ""
