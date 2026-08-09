@@ -32,8 +32,14 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WATCHDOG = ROOT / "agent-base" / "agent-storm-watchdog"
 
 # A healthy ride's tail, measured: 31 distinct lines per 40-line window (homelab meta-watch
-# separation check, 2026-08-07) and a worst single-line share of 8% (mimo) / 0% (opus). Cycling
-# these 31 reproduces both numbers, and they are the negative control for every rule below.
+# separation check, 2026-08-07) and a worst single-line share of 8% (mimo) / 0% (opus). This is the
+# negative control every rule below is argued against, so it has to reproduce the 31 exactly.
+#
+# ⚠ 32 entries, 31 DISTINCT — the tool banner recurs, as it does in any real log. The count that
+#   matters is the distinct one: `healthy()` cycles, and 40 ≥ 32 means every window covers the whole
+#   cycle, so the tail signal reports one number per distinct VALUE. 31 entries with a duplicate
+#   among them reported 30 and quietly cost a line of the documented margin (#45). The worst share
+#   that falls out is 6% — between the two measured healthy rides, and nowhere near the 50% rule.
 HEALTHY = (
     "◒  Reading agent-base/agent-finalize",
     "─── text_editor | developer ──────────────────────────",
@@ -61,6 +67,7 @@ HEALTHY = (
     "To https://github.com/teststuffstash/agent-runtime.git",
     "The failing test is banked; now the minimal fix.",
     "─── text_editor | developer ──────────────────────────",
+    "path: /work/repo/agent-base/agent-storm-watchdog",
     "command: str_replace",
     "The window is the problem, not the threshold.",
     "command: devbox run scan-secrets",
@@ -182,8 +189,21 @@ class TestLoudLoopsStillCaught:
 class TestHealthyRidesSurvive:
     """The regression bar: a narrower window must not start killing honest slow rides."""
 
+    def test_fixture_supplies_the_measured_31_distinct_lines(self, tmp_path):
+        """The negative control is only worth the margin it reproduces (#45).
+
+        `HEALTHY` cycles, so a 40-line window covers every entry and the tail signal sees exactly
+        as many distinct lines as the fixture has distinct VALUES — not as many as it has entries.
+        With one value duplicated the fixture argued the ≤3 threshold against 30, while the header
+        of the watchdog (and the comment above the fixture) both pin the measured healthy tail at
+        31. Assert the number the walk actually reports, not just the length of the tuple, because
+        it is the reported number the rest of this class leans on.
+        """
+        assert len(set(HEALTHY)) == 31, "the fixture must supply 31 DISTINCT lines"
+        assert check(write(tmp_path, healthy(600))).distinct == 31
+
     def test_healthy_ride(self, tmp_path):
-        """mimo/opus shape — 31 distinct lines per 40-line tail, worst share 8%/0%."""
+        """mimo/opus shape — 31 distinct lines per 40-line tail, worst share 6% (measured: 8%/0%)."""
         v = check(write(tmp_path, healthy(600)))
         assert v.share < 50
         assert v.distinct > 3, "31 distinct vs a threshold of 3 is the whole margin"
