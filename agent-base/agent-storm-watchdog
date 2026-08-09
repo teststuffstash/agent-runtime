@@ -70,7 +70,10 @@
 #        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
 #        STORM_REPEAT_PCT=50 (0 disables both repetition signals) · STORM_REPEAT_WINDOW=200
 #        STORM_REPEAT_MIN=40
-#        STORM_MARKER=/tmp/agent-watchdog-class (agent-finalize reads it for the error_class)
+#        AGENT_WATCHDOG_MARKER=/tmp/agent-watchdog-class — where the repetition verdict is written;
+#          agent-finalize reads THIS name for the error_class, so it is the canonical one and both
+#          sides resolve it identically (#46). STORM_MARKER is still honoured as a fallback, on both
+#          sides, for anything that already set it.
 set -u
 
 [ "${STORM_WATCHDOG:-on}" = "off" ] && exit 0
@@ -78,7 +81,11 @@ set -u
 REPEAT_PCT="${STORM_REPEAT_PCT:-50}"
 REPEAT_WINDOW="${STORM_REPEAT_WINDOW:-200}"
 REPEAT_MIN="${STORM_REPEAT_MIN:-40}"
-MARKER="${STORM_MARKER:-/tmp/agent-watchdog-class}"
+# Canonical name first, legacy STORM_MARKER second — agent-finalize's _marker_path() resolves the
+# same two in the same order, and tests/test_watchdog_marker_env.py pins them against each other.
+# Overriding either name alone used to move only this side, and a marker finalize never opens is a
+# repetition kill that classifies as a bare nonzero-exit-143 (#46).
+MARKER="${AGENT_WATCHDOG_MARKER:-${STORM_MARKER:-/tmp/agent-watchdog-class}}"
 
 # Slow-loop signal. Not env-configurable on purpose — see the header.
 REPEAT_TAIL=40           # non-blank lines

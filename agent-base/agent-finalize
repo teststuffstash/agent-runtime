@@ -212,9 +212,16 @@ def _log_text(log_path):
 
 
 def _marker_path():
-    """Where agent-storm-watchdog leaves its verdict. Its own resolution of this path must stay
-    identical — `agent-storm-watchdog --marker` prints that side's answer for a test to pin."""
-    return os.environ.get("AGENT_WATCHDOG_MARKER", "/tmp/agent-watchdog-class")
+    """Where agent-storm-watchdog leaves its verdict, resolved EXACTLY as the watchdog resolves it:
+    AGENT_WATCHDOG_MARKER (canonical), then the legacy STORM_MARKER, then the shipped default. The
+    watchdog used to read only STORM_MARKER here, so overriding either name alone moved one side and
+    the verdict landed in a file this never opened — silently, since the defaults agree (#46).
+    `agent-storm-watchdog --marker` prints that side's answer for a test to pin against this one."""
+    return (
+        os.environ.get("AGENT_WATCHDOG_MARKER")
+        or os.environ.get("STORM_MARKER")
+        or "/tmp/agent-watchdog-class"
+    )
 
 
 def _watchdog_class():

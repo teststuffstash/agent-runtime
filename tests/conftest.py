@@ -59,4 +59,7 @@ def _clean_env(monkeypatch, tmp_path):
     monkeypatch.delenv("HARNESS_EXIT", raising=False)
     monkeypatch.delenv("AGENT_TASK", raising=False)
     monkeypatch.delenv("WORK_BRANCH", raising=False)
+    # Both marker names, because the reader honours STORM_MARKER as a fallback (#46) — an exported
+    # one would otherwise point classify() at a real marker file and decide these tests.
+    monkeypatch.delenv("STORM_MARKER", raising=False)
     monkeypatch.setenv("AGENT_WATCHDOG_MARKER", str(tmp_path / "no-such-marker"))
