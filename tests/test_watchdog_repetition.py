@@ -23,7 +23,10 @@ import os
 import pathlib
 import re
 import subprocess
+import time
 from typing import NamedTuple
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WATCHDOG = ROOT / "agent-base" / "agent-storm-watchdog"
@@ -106,6 +109,24 @@ def check(path, **env):
     distinct = re.search(r"tightest tail: (\d+) distinct", r.stdout)
     assert share and distinct, f"--check must report both signals, got:\n{r.stdout}"
     return Verdict(int(share.group(1)), int(distinct.group(1)), "WOULD KILL" in r.stdout, r.stdout)
+
+
+def signals(path, **env):
+    """The LIVE poll's two numbers at EOF, through the three shipped shell helpers.
+
+    `--check` no longer shells those helpers per sample — it re-expresses them in one awk pass (#43)
+    — so this is the seam that keeps the two from drifting apart.
+    """
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("STORM_")}
+    r = subprocess.run(
+        ["bash", str(WATCHDOG), "--signals", str(path)],
+        capture_output=True, text=True, env={**clean, **env},
+    )
+    assert r.returncode == 0, f"--signals failed: {r.returncode}\n{r.stdout}\n{r.stderr}"
+    share = re.search(r"share: (\d+)", r.stdout)
+    distinct = re.search(r"distinct: (\d+)", r.stdout)
+    assert share and distinct, f"--signals must report both, got:\n{r.stdout}"
+    return int(share.group(1)), int(distinct.group(1))
 
 
 class TestSlowLoopsAreCaught:
@@ -205,3 +226,102 @@ class TestReplayIsFaithful:
         v = check(write(tmp_path, healthy(140) + [NAG] * 65))
         # 65 repeats in the live 200-line tail = 32%. A start-stepping walk reports 61% here.
         assert v.share == 32
+
+
+# The issue's own fixture: 233 healthy lines, then 40 identical ones (ending at line 273), then 500
+# more healthy ones. The burst never reaches EOF, so it is only scoreable at a window end inside it.
+BURST_TAIL_END = 273
+BURST_TRUNCATED = healthy(233) + [NAG] * 40
+BURST = BURST_TRUNCATED + healthy(500, offset=273)
+
+
+def tail_at(out):
+    """The line number `--check` attributes its tightest tail to."""
+    m = re.search(r"tightest tail: \d+ distinct at line (\d+)", out)
+    assert m, f"--check must report where the tightest tail sits, got:\n{out}"
+    return int(m.group(1))
+
+
+class TestNoBurstHidesBetweenSamples:
+    """#43. The walk scores window ENDS, so a burst is seen only if some scored end lands on it —
+    and the tail signal's landing zone is TINY. A verdict of ≤3 distinct needs almost all of the
+    tail's 40 non-blank lines inside the burst, so the shortest scoreable burst (exactly
+    `REPEAT_TAIL` lines) is visible from about five line-ends and no more. Stepping
+    `REPEAT_WINDOW/4` = 50 walks straight over it; so would a step of `REPEAT_TAIL` = 40, or any
+    other coarse step. Only scoring every end is faithful.
+
+    Why this is the failure worth a test: `--check` is what a human replays a saved log through when
+    arguing about a post-mortem, and a false CLEAR there is the harder direction to notice — nobody
+    re-derives a `would not kill`. The same log truncated where the burst ends reads WOULD KILL,
+    which is the contradiction the issue opened on.
+    """
+
+    def test_mid_log_burst_is_scored(self, tmp_path):
+        """The burst at lines 234-273 sits between the old samples (200, 250, 300, …) and was lost."""
+        v = check(write(tmp_path, BURST))
+        assert v.distinct == 1, "the 40 identical lines collapse to one distinct line"
+        assert tail_at(v.out) == BURST_TAIL_END
+        assert v.kill
+        assert v.share < 50, "the tail signal is the one that must fire — 40 of 200 lines is 20%"
+
+    def test_agrees_with_the_same_log_truncated_at_the_burst(self, tmp_path):
+        """`--check` reports the WORST view over the walk, so appending healthy lines after a burst
+        can never soften the verdict — the truncated log's number must still be reachable."""
+        trunc = tmp_path / "trunc"
+        trunc.mkdir()
+        assert check(write(trunc, BURST_TRUNCATED)).distinct == check(write(tmp_path, BURST)).distinct
+
+    def test_walk_does_not_re_scan_the_log_per_step(self, tmp_path):
+        """The other half of the same edit. The shipped walk re-sliced the whole file TWICE per
+        window end (~12s on this 52k-line log), so scoring more ends multiplies a cost that was
+        already the reviewer's complaint on #42; one pass over the log pays for the fidelity above.
+
+        The bound is deliberately loose — it fails when per-step re-scanning comes back, not when
+        the runner is busy.
+        """
+        t0 = time.monotonic()
+        v = check(write(tmp_path, healthy(52_000)))
+        assert time.monotonic() - t0 < 5.0, "the walk is re-reading the log per window end again"
+        assert not v.kill
+
+
+# Logs SHORTER than REPEAT_WINDOW, where the walk scores exactly one position — EOF — so `--check`
+# and the live helpers must print the same pair of numbers or one of them is wrong.
+SHORT_LOGS = {
+    "healthy": healthy(150),
+    "loop": healthy(5) + [NAG] * 40,
+    "half_blank": [x for line in healthy(60) for x in (line, "")],
+    "barely_started": ["agent-session: starting ride (round 1)"] * 12,
+    "untrimmed": [f"  {line}\t" for line in healthy(80)] + ["   ", "\t\t"],
+}
+
+
+class TestReplayMatchesTheLiveArithmetic:
+    """The structural guarantee that #43 traded away, restored as a test.
+
+    Until now `--check` COULD not drift from the live rule, because it shelled the same three
+    helpers per sample. That is precisely what made it too slow to sample finely, so the walk is now
+    one awk pass that re-states them — trim, drop blanks, share of the last 200 raw lines, distinct
+    of the last 40 non-blank ones, and both guards. Two implementations of one rule need a test
+    holding them together, or the replay quietly stops describing the thing that kills rides.
+    """
+
+    @pytest.mark.parametrize("shape", sorted(SHORT_LOGS))
+    def test_same_numbers_as_the_live_helpers(self, tmp_path, shape):
+        p = write(tmp_path, SHORT_LOGS[shape])
+        v = check(p)
+        assert (v.share, v.distinct) == signals(p)
+
+    def test_a_sparse_log_is_unjudgeable_in_both(self, tmp_path):
+        """40 identical lines spread one per 30 raw lines. `tail -n 1000` reaches only 33 of them,
+        so `_distinct` refuses to judge (999) — and the walk must refuse identically. Dropping that
+        guard while porting to awk would report 1 distinct and kill a log the live rule cannot see.
+        """
+        sparse = []
+        for _ in range(40):
+            sparse += [NAG] + [""] * 29
+        p = write(tmp_path, sparse)
+        v = check(p)
+        assert v.distinct == 999
+        assert not v.kill
+        assert signals(p)[1] == 999

@@ -58,6 +58,8 @@
 # s3://agent-transcripts/<stack>/<task>/<session>/run.log):
 #
 #   agent-storm-watchdog --check /path/to/run.log      # prints both signals + the verdict, exits 0
+#   agent-storm-watchdog --signals /path/to/run.log    # the two signals at EOF only — what a poll
+#                                                      # of that log RIGHT NOW would see, no walk
 #
 #   Env: STORM_WATCHDOG=off to disable · STORM_LOG=/tmp/run.log · STORM_THRESHOLD=10
 #        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
@@ -79,8 +81,12 @@ REPEAT_TAIL_DISTINCT=3   # ≤ this many distinct lines in that tail = a loop (h
 REPEAT_TAIL_SCAN=1000    # raw lines read to find $REPEAT_TAIL non-blank ones (deepseek: 42% blank)
 
 # --- shared arithmetic ------------------------------------------------------------------------
-# Both the live poll and the offline replay funnel through these three, so `--check` cannot drift
-# from the rule it claims to reproduce. Each reads lines on stdin.
+# The live poll's whole rule, in three filters. Each reads lines on stdin.
+#
+# `--check` used to funnel through these too, one `sed` slice per sampled window — which is exactly
+# why it had to sample coarsely, and why it walked over the burst in #43. Its walk now scores EVERY
+# window end in ONE pass and therefore re-expresses this arithmetic in awk. `--signals` below dumps
+# these three at EOF so the two implementations can be pinned against each other in tests.
 _norm() { sed 's/[[:space:]]*$//; s/^[[:space:]]*//' | awk 'NF'; }  # trim, drop blanks
 
 # Share (whole %) held by the most frequent line. Prints 0 when there is too little to judge — a run
@@ -101,6 +107,17 @@ _distinct() {
 repeat_share() { tail -n "$REPEAT_WINDOW" "$1" 2>/dev/null | _norm | _share; }
 tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n "$REPEAT_TAIL" | _distinct; }
 
+# Live arithmetic at EOF, printed. This is what the poll below sees RIGHT NOW, through the three
+# helpers above and nothing else — the seam that lets a test assert `--check`'s in-awk rewrite of
+# them still agrees number-for-number (on a log shorter than $REPEAT_WINDOW the walk scores exactly
+# one position, EOF, so the two must print the same pair).
+if [ "${1:-}" = "--signals" ]; then
+  [ -f "${2:-}" ] || { echo "usage: agent-storm-watchdog --signals <run.log>" >&2; exit 2; }
+  echo "share: $(repeat_share "$2")"
+  echo "distinct: $(tail_distinct "$2")"
+  exit 0
+fi
+
 # Offline reproduction: the live loop only ever sees `tail -n N` of a log that is still being
 # written, so replay a saved log at successive END positions and report the worst view.
 #
@@ -109,23 +126,69 @@ tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n
 #     "61% → WOULD KILL" for a log the deployed rule provably never killed (it ran 2h14m). The live
 #     tail there is a full 200 lines and 32%. A replay that flatters the rule is worse than none:
 #     it is the reason the gap took three more live loops to find.
+#
+#   ⚠ Score EVERY end, and do it in one pass (#43). Sampling every $REPEAT_WINDOW/4 = 50th end was
+#     coarser than the tail signal's own 40-line window, so a burst that neither reached EOF nor
+#     happened to sit under a sample was reported `would not kill` while the same log truncated
+#     where the burst ends read WOULD KILL. Tightening the step to $REPEAT_TAIL would not have
+#     fixed it either: a verdict of ≤$REPEAT_TAIL_DISTINCT distinct needs nearly all of the tail
+#     inside the burst, so the SHORTEST scoreable burst (exactly $REPEAT_TAIL lines) is visible
+#     from about five ends. Only every-end is faithful — and every-end is affordable only because
+#     the two per-sample `sed` re-scans of the whole file are gone with it. A false CLEAR is the
+#     failure nobody notices: nobody re-derives a `would not kill`.
+#
+#   The pass keeps two sliding windows and reports the same four numbers the sed walk did:
+#     share   — the last $REPEAT_WINDOW RAW lines, blanks dropped, biggest single-line count over
+#               the survivors; 0 while there are fewer than $REPEAT_MIN of them (_share's guard).
+#     tail    — the last $REPEAT_TAIL NON-BLANK lines, distinct count; 999 unless there are that
+#               many AND they all fall inside the last $REPEAT_TAIL_SCAN raw lines, which is what
+#               `tail -n SCAN | _norm | tail -n TAIL` degrades to on a mostly-blank log
+#               (_distinct's guard).
+#   Ties keep the EARLIEST end, as the sed walk's strict > / < did.
 if [ "${1:-}" = "--check" ]; then
   [ -f "${2:-}" ] || { echo "usage: agent-storm-watchdog --check <run.log>" >&2; exit 2; }
-  _total="$(wc -l < "$2")"; _total="${_total:-0}"
-  _worst=0; _at=0; _tight=999; _tat=0
-  _step=$((REPEAT_WINDOW / 4)); [ "$_step" -lt 1 ] && _step=1
-  _e="$REPEAT_WINDOW"
-  while :; do
-    [ "$_e" -gt "$_total" ] && _e="$_total"
-    _s=$((_e - REPEAT_WINDOW + 1)); [ "$_s" -lt 1 ] && _s=1
-    _sh="$(sed -n "${_s},${_e}p" "$2" | _norm | _share)"; _sh="${_sh:-0}"
-    [ "$_sh" -gt "$_worst" ] && { _worst="$_sh"; _at="$_e"; }
-    _s=$((_e - REPEAT_TAIL_SCAN + 1)); [ "$_s" -lt 1 ] && _s=1
-    _dt="$(sed -n "${_s},${_e}p" "$2" | _norm | tail -n "$REPEAT_TAIL" | _distinct)"; _dt="${_dt:-999}"
-    [ "$_dt" -lt "$_tight" ] && { _tight="$_dt"; _tat="$_e"; }
-    [ "$_e" -ge "$_total" ] && break
-    _e=$((_e + _step))
-  done
+  read -r _worst _at _tight _tat <<<"$(awk \
+    -v W="$REPEAT_WINDOW" -v MIN="$REPEAT_MIN" -v T="$REPEAT_TAIL" -v SCAN="$REPEAT_TAIL_SCAN" '
+    function trim(s) { sub(/^[ \t\r\f\v]+/, "", s); sub(/[ \t\r\f\v]+$/, "", s); return s }
+    # Biggest count in the share window. Recomputed only after a decrement that could have lowered
+    # it — which is O(distinct), i.e. cheapest exactly where it happens most (a loop has 1-3).
+    function top(   k) {
+      if (stale) { topv = 0; for (k in cnt) if (cnt[k] > topv) topv = cnt[k]; stale = 0 }
+      return topv
+    }
+    function score(   sh, d, oldest) {
+      sh = (nbw < MIN) ? 0 : int(top() * 100 / nbw)
+      if (sh > worst) { worst = sh; at = NR }
+      d = 999
+      if (nb >= T) {
+        oldest = pos[(nb + 1) % T]           # raw line of the T-th-from-last non-blank line
+        if (oldest >= NR - SCAN + 1) d = dist
+      }
+      if (d < tight) { tight = d; tat = NR }
+    }
+    BEGIN { tight = 999; if (W < 1) W = 1; if (T < 1) T = 1 }
+    {
+      t = trim($0)
+      if (NR > W) {                          # raw line NR-W leaves the share window
+        o = buf[NR % W]
+        if (o != "") { nbw--; c = --cnt[o]; if (c + 1 >= topv) stale = 1; if (c == 0) delete cnt[o] }
+      }
+      buf[NR % W] = t
+      if (t != "") {
+        nbw++; if (++cnt[t] > topv) topv = cnt[t]
+        nb++
+        if (nb > T) { o = tbuf[nb % T]; if (--dcnt[o] == 0) { delete dcnt[o]; dist-- } }
+        tbuf[nb % T] = t; pos[nb % T] = NR
+        if (dcnt[t]++ == 0) dist++
+      }
+      if (NR >= W) score()
+    }
+    # A log shorter than one window was scored once, at EOF, by the sed walk (it clamped) — so is
+    # this one. Never score short PREFIXES of a long log: 30 banner lines and 15 real ones is a 66%
+    # window the live rule only ever saw before the run had done anything.
+    END { if (NR < W) score(); print worst + 0, at + 0, tight + 0, tat + 0 }
+  ' "$2")"
+  _worst="${_worst:-0}"; _at="${_at:-0}"; _tight="${_tight:-999}"; _tat="${_tat:-0}"
   echo "worst window: ${_worst}% at line ${_at} (one line's share of the last ${REPEAT_WINDOW} lines; threshold ${REPEAT_PCT}%, min ${REPEAT_MIN} non-blank)"
   echo "tightest tail: ${_tight} distinct at line ${_tat} (of the last ${REPEAT_TAIL} non-blank lines; threshold ≤${REPEAT_TAIL_DISTINCT}, 999 = too few lines to judge)"
   if [ "$REPEAT_PCT" -le 0 ]; then
