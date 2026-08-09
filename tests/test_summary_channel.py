@@ -66,13 +66,15 @@ class FakeGitHub:
     def __call__(self, *args, stdin=None, timeout=30):
         self.calls.append((tuple(args), stdin))
         argv = list(args)
-        if argv[:3] == ["pr", "view"]:
-            return _Done(self.sha_rc, "" if self.sha_rc else self.sha + "\n")
+        if argv[:2] == ["pr", "view"]:
+            if "headRefOid" in argv:
+                return _Done(self.sha_rc, "" if self.sha_rc else self.sha + "\n")
+            return _Done(0, "a PR body naming no issue\n")  # the #32 issue-link read
         if argv[0] != "api":
             return _Done(0)
         method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
         path = [a for a in argv[1:] if not a.startswith("-") and a != method][0]
-        body = json.loads(stdin)["body"] if stdin and "body" in (stdin or "") else None
+        body = (json.loads(stdin) if stdin else {}).get("body")
         if path.endswith("/check-runs"):
             if self.check_rc:
                 return _Done(self.check_rc, "", "HTTP 403: Resource not accessible by integration")
@@ -102,11 +104,7 @@ class FakeGitHub:
             return _Done(1, "", "HTTP 404")
         return _Done(0)
 
-    # -- assertions helpers ---------------------------------------------------------------------
-    def creates(self):
-        return [c for c in self.calls if "--method" in c[0] and "POST" in c[0]
-                and c[0][-1].endswith("/comments") is False and "/comments" in " ".join(c[0])]
-
+    # -- assertion helpers ----------------------------------------------------------------------
     def n_comment_creates(self):
         return len([c for (c, _s) in self.calls
                     if "POST" in c and any(a.endswith("/comments") for a in c)])
