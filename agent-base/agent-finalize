@@ -315,6 +315,41 @@ def died_this_round(fail, stats):
     return not any(k in stats for k in ("reproduced", "ci_passed", "root_cause"))
 
 
+# The exit_status values that mean THIS ROUND DIED: everything `failure_signature` can return, minus
+# `no-artifact` — which `died_this_round` excludes for the reason above, and which an existing PR
+# contradicts. `bookkeeping` reads these instead of re-deriving the predicate: by the time it runs,
+# `classify` has already put `died_this_round`'s answer into `stats["exit_status"]`, and re-running
+# the signature match over the log there would be a second place for the two to disagree.
+DEATH_EXIT_STATUSES = ("harness-death", "auth-storm", "budget-403", "timeout")
+
+
+def bookkeeping_route(stats):
+    """Which terminal GitHub action this run gets: "arm" | "strike" | "deliberate-stop" (#49).
+
+    The third surface of #36's predicate. `bookkeeping` used to ask only "is there a PR?", but a PR
+    proves an ARTIFACT EXISTS — on a fix round from round 2 on it is routinely the PREVIOUS round's,
+    so a round that DIED still armed auto-merge and posted a stats comment. `classify` was fixed to
+    call that run `harness-death`; the strike comment it implies was still never posted, and that
+    comment IS the store a coordinator greps to walk the model chain on re-dispatch. The strike went
+    missing on exactly the rounds it exists for.
+
+    So the split is three-way, not two — the artifact and the round's fate are separate questions:
+      - PR, round did not die  → "arm"    (arm auto-merge + stats comment, unchanged)
+      - PR, round died         → "strike" (no arm, no stats comment — but see below)
+      - no PR                  → "strike", or "deliberate-stop" when the worker stopped on its own
+                                 judgment (that is a decision, not a death — retro r1 F2)
+    The #32 issue-link guarantee is NOT part of this answer: it hangs off the PR alone, because a
+    died round's PR is a real artifact that the coordinator scan must still be able to link to its
+    issue (an unlinked one reads as "worker terminal, no PR" and gets RE-DISPATCHED onto finished
+    work). A died round needs that link more than a clean one, not less.
+    """
+    if stats.get("pr_url") and stats.get("exit_status") not in DEATH_EXIT_STATUSES:
+        return "arm"
+    if stats.get("exit_status") == "blocked-deliberate":
+        return "deliberate-stop"
+    return "strike"
+
+
 def classify(log_path, stats):
     """Classify the run into (exit_status, error_class) — the FU-057 enabler.
 
@@ -624,11 +659,16 @@ def _last_lines(log_path, count=15):
 
 
 def bookkeeping(stats, log_path):
-    """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR — arm auto-merge (an un-armed PR is
-    invisible to the ENTIRE merge path: updater, review reflex, GitHub auto-merge) + post the stats
-    comment; without a PR — post the AGENT_STRIKE comment to the issue (that comment IS the strike
-    store the coordinator walks the model chain by; keep the first line's format STABLE). Sets
-    *_by_pod flags in stats so the launcher's fallback skips what already happened."""
+    """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR from a round that ENDED — arm
+    auto-merge (an un-armed PR is invisible to the ENTIRE merge path: updater, review reflex,
+    GitHub auto-merge) + post the stats comment; otherwise — post the AGENT_STRIKE comment to the
+    issue (that comment IS the strike store the coordinator walks the model chain by; keep the
+    first line's format STABLE). Sets *_by_pod flags in stats so the launcher's fallback skips what
+    already happened.
+
+    The route is `bookkeeping_route(stats)`, not `if pr_url` (#49): a PR says an artifact exists,
+    never that THIS round produced it or survived. The issue link (#32) is the one step that stays
+    keyed to the PR alone — see the route function."""
     if not shutil.which("gh"):
         print("bookkeeping: gh not in image — left to the launcher fallback", file=sys.stderr)
         return
@@ -638,6 +678,7 @@ def bookkeeping(stats, log_path):
         return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout, env=env)
 
     pr_url = stats.get("pr_url") or ""
+    route = bookkeeping_route(stats)
     task = os.environ.get("AGENT_TASK") or ""
     repo_url = os.environ.get("REPO_URL") or ""
     slug = ""
@@ -650,7 +691,16 @@ def bookkeeping(stats, log_path):
         # researcher role's gate (homelab FU-105; found live 2026-07-27: finalize armed the
         # first spec PR right past the recipe's "do not arm").
         if pr_url:
-            if os.environ.get("AGENT_ARM_PR", "1") == "0":
+            if route != "arm":
+                # This round DIED holding an earlier round's PR (#49). Arming it would declare the
+                # dead round's work mergeable on the strength of an artifact it did not produce.
+                # The flag is set FALSE, not left unset: unset means "the pod never got to it" and
+                # the launcher's fallback arms it, which would undo this decision one layer up.
+                stats["armed_by_pod"] = False
+                print("bookkeeping: arming + stats comment SKIPPED (exit_status=%s — THIS ROUND "
+                      "died; the PR is an earlier round's artifact). Striking instead."
+                      % (stats.get("exit_status") or "?"), flush=True)
+            elif os.environ.get("AGENT_ARM_PR", "1") == "0":
                 stats["armed_by_pod"] = False
                 print("bookkeeping: arming SKIPPED (AGENT_ARM_PR=0 — human-gated PR)", flush=True)
             else:
@@ -700,34 +750,37 @@ def bookkeeping(stats, log_path):
                 except Exception as exc:  # never turn a good ride into a failed one
                     print("bookkeeping: issue-link step errored: %r (non-fatal)" % exc,
                           file=sys.stderr)
-            body = (
-                "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
-                "| metric | value |\n|---|---|\n"
-                "| model | `%s` (%s) |\n"
-                "| cost | %s |\n"
-                "| duration | %ss |\n"
-                "| ci_passed | %s |\n"
-                "| exit / error_class | `%s` / `%s` |\n"
-                "| node / pod | `%s` / `%s` |\n\n"
-                "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
-            ) % (
-                stats.get("model", "?"), stats.get("harness", "?"),
-                ("$%s" % stats["cost_usd"]) if "cost_usd" in stats
-                else ("subscription — %s turns, %s in (+%s cached) / %s out tok" % (
-                    stats.get("turns", "?"), stats.get("tokens_in", "?"),
-                    stats.get("tokens_cache_read", 0), stats.get("tokens_out", "?"),
-                )) if stats.get("subscription") else "unknown (key unreadable)",
-                stats.get("duration_s", 0), stats.get("ci_passed", "?"),
-                stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
-                stats.get("node", "?"), stats.get("pod", "?"),
-                stats.get("project", "?"), task or "adhoc",
-            )
-            commented = gh("pr", "comment", pr_url, "--body", body)
-            if commented.returncode == 0:
-                stats["stats_comment_by_pod"] = True
-        elif task.startswith("issue-") and slug:
+            if route == "arm":
+                body = (
+                    "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
+                    "| metric | value |\n|---|---|\n"
+                    "| model | `%s` (%s) |\n"
+                    "| cost | %s |\n"
+                    "| duration | %ss |\n"
+                    "| ci_passed | %s |\n"
+                    "| exit / error_class | `%s` / `%s` |\n"
+                    "| node / pod | `%s` / `%s` |\n\n"
+                    "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
+                ) % (
+                    stats.get("model", "?"), stats.get("harness", "?"),
+                    ("$%s" % stats["cost_usd"]) if "cost_usd" in stats
+                    else ("subscription — %s turns, %s in (+%s cached) / %s out tok" % (
+                        stats.get("turns", "?"), stats.get("tokens_in", "?"),
+                        stats.get("tokens_cache_read", 0), stats.get("tokens_out", "?"),
+                    )) if stats.get("subscription") else "unknown (key unreadable)",
+                    stats.get("duration_s", 0), stats.get("ci_passed", "?"),
+                    stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
+                    stats.get("node", "?"), stats.get("pod", "?"),
+                    stats.get("project", "?"), task or "adhoc",
+                )
+                commented = gh("pr", "comment", pr_url, "--body", body)
+                if commented.returncode == 0:
+                    stats["stats_comment_by_pod"] = True
+        # Not `elif`: a died round reaches BOTH legs — the PR above still gets its issue link, and
+        # the strike below is the whole point of #49.
+        if route != "arm" and task.startswith("issue-") and slug:
             issue = task[len("issue-"):]
-            if stats.get("exit_status") == "blocked-deliberate":
+            if route == "deliberate-stop":
                 # NOT a strike (a strike means "the run died — walk the model chain"); a
                 # deliberate stop is the worker's judgment call, reported for the coordinator.
                 # Issue-scoped, not round-scoped (#33) — same answer as the strike path below, from
