@@ -35,6 +35,18 @@ def af():
     return _load()
 
 
+@pytest.fixture(scope="session")
+def af_source():
+    """agent-finalize's own SOURCE text, for the tests that must read the code rather than call it.
+
+    A test that derives its cases from the module OBJECT can only ever see what the module already
+    agrees on: `DEATH_EXIT_STATUSES` iterated against `bookkeeping_route`, which consults the same
+    tuple, is self-referential (#61). Pinning a hand-maintained table to the literals a function can
+    actually return needs the source. Same path as `_load()`, so the two cannot drift.
+    """
+    return _FINALIZE.read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def logfile(tmp_path):
     """Write a run log and hand back its path — classify() reads from disk, not a string."""

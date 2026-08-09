@@ -21,7 +21,53 @@ no PR" to the coordinator scan and gets re-dispatched onto finished work):
 Hermetic: the decision is a pure function over `stats`, so most of this is dict-in, string-out. The
 wiring tests stub `shutil.which` + `subprocess.run` and assert on the recorded `gh` argv — no gh,
 no network, no remote.
+
+The death-class coverage here reads `failure_signature`'s SOURCE (#61). It used to iterate
+`DEATH_EXIT_STATUSES` — the very tuple `bookkeeping_route` consults — which is self-referential: a
+fifth signature added to `failure_signature()` alone kept the loop green while the new class took
+the pre-#49 route (arm + stats comment, no `AGENT_STRIKE`). The table is hand-maintained, so the
+test has to pin it to something the table cannot move.
 """
+import ast
+
+
+def _signature_exit_statuses(source):
+    """Every `exit_status` literal `failure_signature()` can return, read out of the source.
+
+    The one thing this must not do is ask the module what it thinks its death classes are — that is
+    the bug (#61). So: parse the file, find the function, take the first element of each returned
+    tuple. Anything it cannot read as a literal is a hard failure, not a skip; a silently-dropped
+    return would restore exactly the blind spot this exists to close.
+    """
+    fn = next((n for n in ast.walk(ast.parse(source))
+               if isinstance(n, ast.FunctionDef) and n.name == "failure_signature"), None)
+    assert fn is not None, "agent-finalize has no `failure_signature` — renamed? this pin is blind"
+
+    def own_returns(node):
+        """Returns in `failure_signature`'s OWN body — not its nested `n(pat)` helper's, which
+        returns a match count and would otherwise read as an unparseable signature."""
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(child, ast.Return):
+                yield child
+            yield from own_returns(child)
+
+    statuses = set()
+    for node in own_returns(fn):
+        value = node.value
+        if value is None or (isinstance(value, ast.Constant) and value.value is None):
+            continue  # `return None` — no machine-detectable failure in the log
+        where = f"agent-base/agent-finalize:{node.lineno}"
+        assert isinstance(value, ast.Tuple) and value.elts, (
+            f"{where}: failure_signature must return (exit_status, error_class) or None")
+        first = value.elts[0]
+        assert isinstance(first, ast.Constant) and isinstance(first.value, str), (
+            f"{where}: exit_status is not a string literal, so this pin cannot read it. Either keep "
+            "it literal or teach `_signature_exit_statuses` to resolve it — do NOT drop the case.")
+        statuses.add(first.value)
+    assert statuses, "failure_signature returns no signatures at all — the pin read nothing"
+    return statuses
 
 
 class TestBookkeepingRoute:
@@ -42,12 +88,26 @@ class TestBookkeepingRoute:
         assert af.bookkeeping_route(
             {"pr_url": "http://x/1", "exit_status": "harness-death"}) == "strike"
 
-    def test_every_death_class_strikes_with_a_pr(self, af):
-        """All four classes `failure_signature()` can return through `died_this_round()`. Pinned
-        together so a new death class cannot land on the strike path in `classify()` and the arm
-        path here."""
-        for status in af.DEATH_EXIT_STATUSES:
-            assert af.bookkeeping_route({"pr_url": "http://x/1", "exit_status": status}) == "strike"
+    def test_every_death_class_strikes_with_a_pr(self, af, af_source):
+        """Every class `failure_signature()` can return through `died_this_round()` — enumerated
+        from ITS SOURCE, not from `DEATH_EXIT_STATUSES` (#61). Iterating the tuple that
+        `bookkeeping_route` itself consults proves only that the module agrees with itself; a fifth
+        signature added to `failure_signature()` alone would arm auto-merge here and never be
+        noticed. Read from the source, the new class fails this loop the day it lands."""
+        for status in sorted(_signature_exit_statuses(af_source) - {"no-artifact"}):
+            assert af.bookkeeping_route(
+                {"pr_url": "http://x/1", "exit_status": status}) == "strike", (
+                f"`{status}` is a failure_signature death class that still arms auto-merge — "
+                "add it to DEATH_EXIT_STATUSES (#49 re-opened for the new class)")
+
+    def test_death_table_is_exactly_the_signatures_minus_no_artifact(self, af, af_source):
+        """The table pin itself: `DEATH_EXIT_STATUSES ∪ {no-artifact}` == the signature literals.
+
+        Set-EQUALITY, both directions. A missing entry re-opens #49 for the new class (the loop
+        above catches that too); a stale extra entry is a status nothing can produce, which quietly
+        strikes a run on a class `classify()` assigns for some other reason. `no-artifact` is the
+        one deliberate exclusion — see `died_this_round`."""
+        assert _signature_exit_statuses(af_source) == set(af.DEATH_EXIT_STATUSES) | {"no-artifact"}
 
     def test_no_artifact_is_not_a_death(self, af):
         """`no-artifact`/token-expiry is a claim about the ARTIFACT ("green work never reached
