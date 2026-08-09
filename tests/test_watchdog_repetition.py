@@ -182,6 +182,19 @@ class TestLoudLoopsStillCaught:
 class TestHealthyRidesSurvive:
     """The regression bar: a narrower window must not start killing honest slow rides."""
 
+    def test_fixture_supplies_the_measured_31_distinct_lines(self, tmp_path):
+        """The negative control is only worth the margin it reproduces (#45).
+
+        `HEALTHY` cycles, so a 40-line window covers every entry and the tail signal sees exactly
+        as many distinct lines as the fixture has distinct VALUES — not as many as it has entries.
+        With one value duplicated the fixture argued the ≤3 threshold against 30, while the header
+        of the watchdog (and the comment above the fixture) both pin the measured healthy tail at
+        31. Assert the number the walk actually reports, not just the length of the tuple, because
+        it is the reported number the rest of this class leans on.
+        """
+        assert len(set(HEALTHY)) == 31, "the fixture must supply 31 DISTINCT lines"
+        assert check(write(tmp_path, healthy(600))).distinct == 31
+
     def test_healthy_ride(self, tmp_path):
         """mimo/opus shape — 31 distinct lines per 40-line tail, worst share 8%/0%."""
         v = check(write(tmp_path, healthy(600)))
