@@ -79,6 +79,14 @@ class TestBookkeepingWiring:
 
         def _fake_run(argv, **kw):
             calls.append(tuple(argv))
+            # Canned answers for the two ADR-103 reads (#62), so the arm leg gets far enough to
+            # emit its channels here too. `[]` is a READABLE empty timeline — an empty stdout is
+            # not, and `post_summary_event` fails closed on it by design; the channel's own cases
+            # live in tests/test_summary_channel.py.
+            if argv[1:3] == ["pr", "view"]:
+                return _Done(0, "deadbee\n")
+            if "api" in argv and "--method" not in argv:
+                return _Done(0, "[]")
             return _Done()
 
         monkeypatch.setattr(af.shutil, "which", lambda _n: "/usr/bin/gh")
@@ -96,11 +104,14 @@ class TestBookkeepingWiring:
         return [c for c in calls if c[1:1 + len(prefix)] == prefix]
 
     def test_clean_round_with_a_pr_arms_and_comments(self, af, monkeypatch, logfile):
-        """The path that must NOT change."""
-        stats = {"pr_url": "http://x/1", "exit_status": "clean", "pod": "p"}
+        """The path that must NOT change — except for WHERE the stats land (#62/ADR-103): the
+        table is now the `agent-ride` check-run and the index line is an append to the single
+        `<!-- agent-summary -->` comment, so there is no `gh pr comment` any more. The routing
+        (arm + stats channel, no strike) and both `*_by_pod` flags are unchanged."""
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "clean", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("all fine\n"), stats)
         assert self._find(calls, "pr", "merge")
-        assert self._find(calls, "pr", "comment")
+        assert not self._find(calls, "pr", "comment")
         assert not self._find(calls, "issue", "comment")
         assert stats.get("armed_by_pod") is True
         assert stats.get("stats_comment_by_pod") is True
