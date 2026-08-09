@@ -316,3 +316,47 @@ class TestSalvageGuardOnAFixRound:
 
         monkeypatch.setattr(af.subprocess, "run", _boom)
         af.salvage_push({"pr_url": "https://github.com/x/circles/pull/39"})
+
+    def test_a_dead_git_token_against_an_existing_pr_still_skips_salvage(
+            self, af, monkeypatch, tmp_path):
+        """The `no-artifact`/token-expiry leg of the guard, on the salvage side (#50).
+
+        `classify` pins this direction already (`test_a_dead_git_token_never_contradicts_an
+        _existing_pr`); `salvage_push` asks the SAME predicate and nothing pinned it here. The
+        signature is a claim about the ARTIFACT — "green work never reached GitHub" — which a PR
+        in hand contradicts, so it is the one signature that must not reopen the guard: salvaging
+        on it would `git add -A` and force-push a wip commit onto a live PR every time a push
+        401'd late in an otherwise finished round.
+        """
+        (tmp_path / ".git").mkdir()
+        log = tmp_path / "run.log"
+        log.write_text("fatal: could not read Username for 'https://github.com'\n",
+                       encoding="utf-8")
+        monkeypatch.setenv("WORKDIR", str(tmp_path))
+
+        def _boom(*a, **kw):
+            raise AssertionError("salvage must not touch git on a dead-git-token round with a PR")
+
+        monkeypatch.setattr(af.subprocess, "run", _boom)
+        stats = {"pr_url": "https://github.com/x/circles/pull/39", "ci_passed": True}
+        af.salvage_push(stats, str(log))
+        assert stats == {"pr_url": "https://github.com/x/circles/pull/39", "ci_passed": True}
+
+    def test_the_exclusion_holds_with_no_end_of_run_report_at_all(self, af):
+        """The exclusion isolated, at the predicate (#50) — the leg the test above cannot reach.
+
+        End to end the two halves of `died_this_round` overlap: `failure_signature` only returns
+        token-expiry when `ci_passed is True`, and `ci_passed` in stats is itself an end-of-run
+        report, so the round-finished tiebreak would hold the skip even if the `no-artifact`
+        clause were deleted. Asked directly, with stats carrying nothing but the PR, only the
+        exclusion can answer — which is what makes this the regression test for it.
+        """
+        assert af.died_this_round(("no-artifact", "token-expiry"),
+                                  {"pr_url": "https://github.com/x/circles/pull/39"}) is False
+
+    def test_the_exclusion_is_for_that_class_only_not_for_any_pr(self, af):
+        """The other direction, in the same breath: excluding the artifact claim must not become
+        excluding every signature that arrives with a PR. Same stats, a SESSION death — #36's
+        whole point — still dies."""
+        assert af.died_this_round(("harness-death", "goose-32602-truncation"),
+                                  {"pr_url": "https://github.com/x/circles/pull/39"}) is True
