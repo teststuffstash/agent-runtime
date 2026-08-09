@@ -60,6 +60,11 @@
 #   agent-storm-watchdog --check /path/to/run.log      # prints both signals + the verdict, exits 0
 #   agent-storm-watchdog --signals /path/to/run.log    # the two signals at EOF only — what a poll
 #                                                      # of that log RIGHT NOW would see, no walk
+#   agent-storm-watchdog --marker                      # where a kill WOULD write its marker file,
+#                                                      # resolved from the env — the seam that lets a
+#                                                      # test pin this side's answer against
+#                                                      # agent-finalize's without starting the poll
+#                                                      # loop (whose kill path SIGTERMs the harness)
 #
 #   Env: STORM_WATCHDOG=off to disable · STORM_LOG=/tmp/run.log · STORM_THRESHOLD=10
 #        STORM_WINDOW=50 · STORM_POLL_S=10 · STORM_GRACE_S=15
@@ -111,6 +116,11 @@ tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n
 # helpers above and nothing else — the seam that lets a test assert `--check`'s in-awk rewrite of
 # them still agrees number-for-number (on a log shorter than $REPEAT_WINDOW the walk scores exactly
 # one position, EOF, so the two must print the same pair).
+if [ "${1:-}" = "--marker" ]; then
+  echo "$MARKER"
+  exit 0
+fi
+
 if [ "${1:-}" = "--signals" ]; then
   [ -f "${2:-}" ] || { echo "usage: agent-storm-watchdog --signals <run.log>" >&2; exit 2; }
   echo "share: $(repeat_share "$2")"
