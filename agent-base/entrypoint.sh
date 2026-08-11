@@ -73,9 +73,16 @@ elif [ -n "${GH_TOKEN:-}" ]; then
   git config --global user.email "${GIT_AUTHOR_EMAIL:-agent@teststuff.net}"
 fi
 
+# FU-160 in-pod half (agent-runtime#66): stamp the spans that end BEFORE `agent-finalize
+# --snapshot`, which is the earliest timestamp finalize holds — so this is the only place in the
+# pod that can see them. finalize emits them at the end as `agent_run_phase_seconds{phase=...}`,
+# breaking the launcher's opaque `ride` bar open. `|| true` on every mark: `set -e` is on from the
+# top of this file and an observability stamp may never fail a ride.
 if [ ! -d "$WORKDIR/.git" ]; then
   echo "→ cloning $REPO_URL @ $BASE_REF"
+  _phase_t0=$(date +%s)
   git clone --depth 50 --branch "$BASE_REF" "$REPO_URL" "$WORKDIR"
+  agent-finalize --mark clone "$(( $(date +%s) - _phase_t0 ))" || true
 fi
 cd "$WORKDIR"
 # Deterministic branch state (old finding C, homelab TICK-LOG 2026-07-09): when the caller names an
@@ -163,7 +170,10 @@ fi
 # pods (populates the cache above); near-instant for the same closure afterwards.
 if [ -f devbox.json ]; then
   echo "→ devbox install (project toolchain)"
+  _phase_t0=$(date +%s)
   devbox install
+  # The row FU-096's cache work is judged by: cold nix eval was measured at 94s, seeded at 4s.
+  agent-finalize --mark devbox-install "$(( $(date +%s) - _phase_t0 ))" || true
 fi
 
 # claude harness (FU-066): the image pre-seeds trust for the default /work/repo, but WORKDIR is

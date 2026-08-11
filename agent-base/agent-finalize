@@ -29,6 +29,10 @@ import json, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request
 
 START_EPOCH = "/tmp/agent-start-epoch"
 USAGE_START = "/tmp/agent-usage-start"
+# One line per CLOSED in-pod phase, appended by `agent-finalize --mark` (FU-160 / #66). Written by
+# the entrypoint for the spans that end BEFORE --snapshot; read once, at finalize.
+PHASE_MARKS = "/tmp/agent-phase-marks"
+PUSHGATEWAY_DEFAULT = "http://prometheus-pushgateway.monitoring.svc.cluster.local:9091"
 
 
 def or_usage():
@@ -1048,6 +1052,191 @@ def bookkeeping(stats, log_path):
         print("bookkeeping: non-fatal error: %s" % e, file=sys.stderr)
 
 
+def _seg(v):
+    """URL-path-safe pushgateway grouping-key segment. Empty is NOT a legal grouping label value —
+    a `//` in the path makes the gateway reject the whole push — so an unknown rides as "unknown".
+    Shared by both pushers so the two group paths cannot escape differently."""
+    return urllib.parse.quote(str(v) if v is not None else "", safe="") or "unknown"
+
+
+def _lv(v):
+    """Prometheus label-value escaping. Shared for the same reason as `_seg`: `agent_run`'s labels
+    come from env/stats, `agent_run_phase`'s come from a file the entrypoint writes, and both are
+    exposition text where an unescaped quote or newline forges a sample."""
+    return str(v).replace("\\", r"\\").replace('"', r"\"").replace("\n", r"\n")
+
+
+def _issue_segment():
+    """`AGENT_TASK` → the `issue` grouping-label value, exactly as the launcher derives it: strip a
+    leading `issue-`, leave everything else alone (so a `pr-12` ride stays `pr-12`)."""
+    task = os.environ.get("AGENT_TASK") or "adhoc"
+    return task[len("issue-"):] if task.startswith("issue-") else task
+
+
+# ── FU-160 in-pod half (#66): the ride's INTERIOR ─────────────────────────────────────────────
+# The launcher (homelab agents/agent-session.sh) owns four phases — dispatch-gates, pod-spinup,
+# ride, bookkeeping — where `ride` is the ENVELOPE around everything this repo does. A growing
+# `ride` bar therefore says WHERE to look and nothing about what happened. These functions emit
+# the pod's own share of that interval into the same metric family.
+PHASE_JOB = "agent_run_phase"
+PHASE_SOURCE = "in-pod"
+# A phase name becomes a Prometheus label value and a path-free token, and it arrives from SHELL.
+# Anything outside this alphabet is refused at the door rather than escaped downstream.
+PHASE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
+
+
+def _marks_path():
+    return os.environ.get("AGENT_PHASE_MARKS") or PHASE_MARKS
+
+
+def mark_phase(phase, seconds, path=None):
+    """Record one CLOSED in-pod phase: `agent-finalize --mark <phase> <seconds>`.
+
+    The entrypoint is the only thing in the pod that can see where the clone and `devbox install`
+    end — both finish before `--snapshot` even runs — so it needs a way to hand finalize a span.
+    The file format has exactly ONE writer (here) so a shell half and a python half cannot drift.
+
+    Refuses rather than guesses: a name outside `PHASE_NAME_RE`, or a duration that is not a
+    non-negative number, writes NOTHING. Returns True only when a line landed, and never raises —
+    the entrypoint runs under `set -e` and a stats mark may not fail a ride.
+    """
+    name = str(phase).strip()
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        value = None
+    if not PHASE_NAME_RE.match(name) or value is None or not value >= 0:
+        print("phase-mark: refusing %r=%r (want a named, non-negative duration in seconds)"
+              % (phase, seconds), file=sys.stderr)
+        return False
+    try:
+        with open(path or _marks_path(), "a") as fh:
+            fh.write("%s %.3f\n" % (name, value))
+        return True
+    except Exception as e:
+        print("phase-mark: %s not recorded: %s (non-fatal)" % (name, e), file=sys.stderr)
+        return False
+
+
+def read_phase_marks(path=None):
+    """The marks file → {phase: seconds}, in the order the phases closed.
+
+    Absent file, unreadable file, garbled line: that row is simply not there. A line that cannot
+    be parsed is DROPPED, never interpolated — a wrong span on the panel is worse than a missing
+    one, and this whole family is best-effort observability.
+    """
+    out = {}
+    try:
+        with open(path or _marks_path(), errors="replace") as fh:
+            lines = fh.readlines()
+    except Exception:
+        return out
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 2 or not PHASE_NAME_RE.match(parts[0]):
+            continue
+        try:
+            value = float(parts[1])
+        except ValueError:
+            continue
+        if value >= 0:
+            out[parts[0]] = value  # last write wins: a re-marked phase corrects itself
+    return out
+
+
+def phase_durations(marks, start_epoch, finalize_epoch, now):
+    """The in-pod phase table: the entrypoint's marks + the two spans finalize measures itself.
+
+    Pure over its inputs, so the arithmetic is testable without a ride:
+      `llm-loop` = --snapshot (the end of prep) → finalize's first statement. The harness/LLM loop,
+                   including whatever gates the model ran inside it — those are the model's own
+                   `devbox run ci` invocations and the pod cannot see their boundaries from here.
+      `finalize` = that instant → now. The terminal in-pod leg: usage settle, salvage push, PR
+                   arm + issue link, the summary/strike comments.
+
+    A span whose two ends are not both known is OMITTED, never emitted as 0 — the #12 class on the
+    duration side. A 0s `llm-loop` is a fabricated measurement that reads, on the panel, as a ride
+    whose model never ran, and is indistinguishable from a genuinely instant one.
+    """
+    out = dict(marks or {})
+    if finalize_epoch is None or now is None:
+        return out
+    if start_epoch is not None:
+        # max(): a backwards clock is not a negative span. Both ends are KNOWN here, so this is a
+        # clamp on a bad measurement, not a probe failing into a value.
+        out["llm-loop"] = round(max(0.0, float(finalize_epoch) - float(start_epoch)), 3)
+    out["finalize"] = round(max(0.0, float(now) - float(finalize_epoch)), 3)
+    return out
+
+
+def phase_group_path(project, issue, rnd, source=PHASE_SOURCE):
+    """The pushgateway grouping key for the IN-POD phases — the design decision of #66.
+
+    The launcher pushes its four phases into
+      /metrics/job/agent_run_phase/project/<p>/issue/<n>/round/<r>/role/worker
+    and re-pushes the WHOLE family on every phase close, because a push replaces same-named
+    metrics within a group. Pushing these rows into that same group would make the two sides
+    clobber each other — and the launcher's final `bookkeeping` push happens AFTER this pod is
+    gone, so the in-pod rows are the ones that would lose: silently, in production only.
+
+    So: the same JOB, one EXTRA grouping label `source=in-pod` (option 1 of the issue). A distinct
+    grouping key is a distinct group, so neither side can delete the other's series, and NO
+    homelab change is required — the dashboard panels aggregate `by (phase)` and the
+    `AgentRunPhaseSlow` alert joins `and on (project, issue, round, role)`, both of which keep
+    matching. A separate job (option 2) would be a cleaner separation on paper, but the alert and
+    the three panels pin `job="agent_run_phase"` and would go blind to exactly the rows this adds.
+
+    ⚠ Known imprecision, stated rather than hidden: two `push_time_seconds{job="agent_run_phase"}`
+    series now exist per ride, so the alert's freshness clause is satisfied when EITHER group is
+    fresh.
+    """
+    return "/metrics/job/%s/project/%s/issue/%s/round/%s/role/worker/source/%s" % (
+        PHASE_JOB, _seg(project), _seg(issue), _seg(rnd), _seg(source),
+    )
+
+
+def phase_metrics_body(phases):
+    """The exposition body. The contract is fixed by consumers that already exist (three dashboard
+    panels + the alert): metric `agent_run_phase_seconds`, gauge, ONE label `phase`, value in
+    seconds. No extra labels — the launcher's rows carry none, and a split label set is how a
+    `by (phase)` panel quietly grows a second series per ride."""
+    if not phases:
+        return ""
+    lines = ["# TYPE agent_run_phase_seconds gauge"]
+    for name, seconds in phases.items():
+        lines.append('agent_run_phase_seconds{phase="%s"} %s' % (_lv(name), seconds))
+    return "\n".join(lines) + "\n"
+
+
+def push_phase_metrics(phases, stats):
+    """Push the in-pod phase table (#66). Best-effort in every direction, exactly like its
+    `agent_run` sibling: no gateway configured, an unreachable one, or nothing measured is a
+    stderr line and a normal return — never a failed run.
+
+    PUT, not POST: this group is exclusively the pod's (nothing else sets `source=in-pod`), so a
+    re-run of the same issue/round must replace it wholesale rather than leave a stale phase from
+    an earlier attempt behind. The clobber this issue is about is BETWEEN groups, and this group
+    is ours.
+    """
+    if not phases:
+        return  # an empty group is worse than none: it answers the alert's freshness clause
+    url = os.environ.get("AGENT_PUSHGATEWAY_URL", PUSHGATEWAY_DEFAULT)
+    if not url:
+        return
+    group = phase_group_path(stats.get("project"), _issue_segment(),
+                             os.environ.get("AGENT_ROUND") or "1")
+    try:
+        req = urllib.request.Request(
+            url.rstrip("/") + group, data=phase_metrics_body(phases).encode(), method="PUT",
+            headers={"Content-Type": "text/plain"},
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print("phase-metrics: pushed %s → %s%s"
+              % (",".join(phases), url.rstrip("/"), group), flush=True)
+    except Exception as e:
+        print("phase-metrics: pushgateway push FAILED: %s (non-fatal)" % e, file=sys.stderr)
+
+
 def push_metrics(stats, exit_status, error_class):
     """Push this run's cost/duration/outcome to the Prometheus pushgateway (FU-057 §B1) so worker
     $ reaches Prometheus — today it only rode the Loki stats line. Coordinator/reviewer cost already
@@ -1058,29 +1247,17 @@ def push_metrics(stats, exit_status, error_class):
     error_class ride as metric labels → the model-health & cost dashboards pivot on them. Best-effort:
     an unreachable pushgateway (or none) must never fail the run.
     """
-    url = os.environ.get(
-        "AGENT_PUSHGATEWAY_URL",
-        "http://prometheus-pushgateway.monitoring.svc.cluster.local:9091",
-    )
+    url = os.environ.get("AGENT_PUSHGATEWAY_URL", PUSHGATEWAY_DEFAULT)
     if not url:
         return
-    task = os.environ.get("AGENT_TASK") or "adhoc"
-    issue = task[len("issue-"):] if task.startswith("issue-") else task
+    issue = _issue_segment()
     rnd = os.environ.get("AGENT_ROUND") or "1"
-
-    def seg(v):  # URL-path-safe grouping-key segment
-        return urllib.parse.quote(str(v) or "unknown", safe="")
-
     group = "/metrics/job/agent_run/role/worker/project/%s/issue/%s/round/%s" % (
-        seg(stats.get("project")), seg(issue), seg(rnd),
+        _seg(stats.get("project")), _seg(issue), _seg(rnd),
     )
-
-    def lv(v):  # Prometheus label value escaping
-        return str(v).replace("\\", r"\\").replace('"', r"\"").replace("\n", r"\n")
-
     labels = 'model="%s",node="%s",harness="%s",exit_status="%s",error_class="%s"' % (
-        lv(stats.get("model", "")), lv(stats.get("node", "")), lv(stats.get("harness", "")),
-        lv(exit_status), lv(error_class),
+        _lv(stats.get("model", "")), _lv(stats.get("node", "")), _lv(stats.get("harness", "")),
+        _lv(exit_status), _lv(error_class),
     )
     # cost is pushed ONLY when known — pushing 0 for an unreadable key re-creates the undercount
     # agent-runtime#12 fixed (the ledger-reflex backfills unknowns from the activity API).
@@ -1211,6 +1388,9 @@ def upload_transcripts(stats, log_path):
 
 
 def finalize(log_path):
+    # FIRST statement (#66): the in-pod boundary between the harness/LLM loop and this terminal
+    # leg. Before the settle sleep below — those 6s are finalize's own, not the model's.
+    finalize_epoch = time.time()
     time.sleep(6)  # let OpenRouter usage accounting settle for the last request(s)
     start_epoch = _read_float(START_EPOCH)
     stats = {
@@ -1278,6 +1458,13 @@ def finalize(log_path):
         push_metrics(stats, exit_status, error_class)
     except Exception as e:
         print("metrics: non-fatal error: %s" % e, file=sys.stderr)
+    try:  # FU-160 in-pod half (#66): the ride's interior, so the launcher's `ride` envelope stops
+        # being one opaque bar. Pushed HERE and not after the transcript upload on purpose — the
+        # `finalize` span would otherwise measure an S3 timeout, and the push would wait on it.
+        push_phase_metrics(
+            phase_durations(read_phase_marks(), start_epoch, finalize_epoch, time.time()), stats)
+    except Exception as e:
+        print("phase-metrics: non-fatal error: %s" % e, file=sys.stderr)
     try:  # §A1 capture — deliberately after the stats line
         upload_transcripts(stats, log_path)
     except Exception as e:
@@ -1288,6 +1475,12 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "--snapshot":
             snapshot()
+        elif len(sys.argv) > 1 and sys.argv[1] == "--mark":
+            # `agent-finalize --mark <phase> <seconds>` (#66). Missing args are refused by
+            # mark_phase itself, loudly and with exit 0: a mis-called stats helper must not take
+            # the ride down with it.
+            mark_phase(sys.argv[2] if len(sys.argv) > 2 else "",
+                       sys.argv[3] if len(sys.argv) > 3 else "")
         else:
             finalize(sys.argv[1] if len(sys.argv) > 1 else "")
     except Exception as e:  # never fail the run on stats
