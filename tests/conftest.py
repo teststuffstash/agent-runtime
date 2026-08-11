@@ -75,3 +75,7 @@ def _clean_env(monkeypatch, tmp_path):
     # one would otherwise point classify() at a real marker file and decide these tests.
     monkeypatch.delenv("STORM_MARKER", raising=False)
     monkeypatch.setenv("AGENT_WATCHDOG_MARKER", str(tmp_path / "no-such-marker"))
+    # Same reasoning for the phase marks (#66): this suite runs INSIDE an agent pod, whose
+    # entrypoint has already written /tmp/agent-phase-marks for the real ride. A test reading the
+    # default path would then assert against another run's clone time.
+    monkeypatch.setenv("AGENT_PHASE_MARKS", str(tmp_path / "no-such-phase-marks"))
