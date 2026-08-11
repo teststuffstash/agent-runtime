@@ -25,6 +25,16 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      # The carved-out dep-bump lane's replacement owner (CODEOWNERS un-owns
+      # agent-base/devbox.{json,lock}; this asserts such a PR is a pure version/hash diff).
+      # gh comes baked in the ARC runner image (homelab docker/arc-runner/).
+      - name: deps-pin-guard (carved-out dep lane)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GUARD_SET: agent-base/devbox.json agent-base/devbox.lock
+        run: sh scripts/deps-pin-guard.sh
       - uses: docker/setup-buildx-action@v3
       - name: Build agent-base image (no push)
         uses: docker/build-push-action@v6

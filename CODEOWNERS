@@ -16,9 +16,11 @@
 # ── The image definition + toolchain. A dep or base-image change ships to every ride at once, and
 # the lockfiles are what make a rebuild reproducible.
 /agent-base/Dockerfile          @RasmusSoot
-/agent-base/devbox.json         @RasmusSoot
-/agent-base/devbox.lock         @RasmusSoot
 /devbox.json                    @RasmusSoot
+# agent-base/devbox.{json,lock} carved out 2026-08-11 (require_code_owner_review flipped true —
+# owning them would park every Renovate/devbox-update bump on a human). Ownership REPLACED, not
+# dropped: scripts/deps-pin-guard.sh in the required `ci` check permits only a pure
+# version/hash diff to these two files; anything wider (or mixed with other paths) reds CI.
 
 # ── The recipes are the agent's own instructions — an agent able to edit them is not gated at all.
 /.agents/                       @RasmusSoot
