@@ -905,6 +905,169 @@ def emit_run_stats(gh, stats, task, slug, now=None):
     return emitted
 
 
+# ── ADR-097 leg (homelab#379 worker half / #70): the deterministic Touches-escapes block ─────
+# The worker's JUSTIFICATION of each escape stays a recipe instruction; the LIST is finalize's
+# fact. Computed from git (the changed paths) × the issue's declared `Touches:` footprint with the
+# canonical matcher's semantics (homelab `agents/touches-check.sh` / `footprint.sh`, ADR-097), then
+# appended to the PR body the same edit-in-place discipline as `<!-- agent-summary -->`: round 2
+# rewrites round 1's block, it does not stack a second one.
+TOUCHES_BLOCK_BEGIN = "<!-- agent-touches: begin -->"
+TOUCHES_BLOCK_END = "<!-- agent-touches: end -->"
+# Governance tier (carried from the shell helper): an escaped path under one of these prefixes
+# rides as `path|governance`, so the homelab reviewer's BLOCKING finding is not silently dropped.
+GOVERNANCE_PREFIXES = ("agents/", ".agents/", "scripts/", "policy/", ".github/",
+                       "tofu/github/", "tofu/cloudflare/")
+
+
+def _normalize_footprint(entry):
+    """ADR-097 normalization of one `Touches:` entry: cut at the FIRST `*`, strip one trailing `/`.
+
+    `chassis/**` → `chassis/` → `chassis`. A leading-`*` entry (`**/x.py`) cuts to the EMPTY
+    prefix — the everything-match, conservative by construction. Mirror of homelab
+    `agents/footprint.sh` (ADR-097)."""
+    prefix = entry.split("*", 1)[0]
+    if prefix.endswith("/"):
+        prefix = prefix[:-1]
+    return prefix
+
+
+def footprint_overlap(a, b):
+    """Path-boundary-aware prefix overlap (homelab `agents/touches-check.sh`, ADR-097).
+
+    `a` overlaps `b` iff `a == b`, `a` starts with `b + "/"`, or `b` starts with `a + "/"` — NOT
+    raw string-prefix (`chassis` vs `chassis-x` do NOT overlap). Either side normalizing to the
+    empty prefix (a leading-`*` entry) matches everything."""
+    if not a or not b:
+        return True
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def parse_touches_footprint(issue_body):
+    """The issue body's declared `Touches:` line → the normalized footprint entries, or None.
+
+    None is UNDECLARED: no `Touches:` line, an empty value, or a bare `*` — each means the issue
+    declared no reviewable footprint and every changed path escapes. Absent must be None, never []
+    and never a crash. Whitespace around comma-separated entries is stripped and empty entries are
+    dropped; an entry that normalizes to the empty prefix stays as "" (it matches everything)."""
+    if not issue_body:
+        return None
+    for line in issue_body.splitlines():
+        m = re.match(r"^\s*Touches\s*:\s*(.*?)\s*$", line, re.IGNORECASE)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if not value or value == "*":
+            return None
+        return [_normalize_footprint(e.strip()) for e in value.split(",") if e.strip()]
+    return None
+
+
+def _governance_suffix(path):
+    """`|governance` for an escaped path in the governance tier — carried, never dropped."""
+    return "|governance" if path.startswith(GOVERNANCE_PREFIXES) else ""
+
+
+def touches_escapes(footprint, changed_paths):
+    """The escape set: changed paths that do NOT overlap the declared footprint.
+
+    Returns (undeclared, escapes). undeclared=True when `footprint` is None — the issue declared
+    no reviewable footprint, so EVERY changed path escapes and the block is `Touches: undeclared`
+    (never a path list). Otherwise a changed path escapes iff it does not overlap ANY declared
+    entry — the changed path rides as a singleton footprint entry through the conflict test."""
+    if footprint is None:
+        return True, list(changed_paths)
+    escapes = [p for p in changed_paths
+               if not any(footprint_overlap(_normalize_footprint(p), f) for f in footprint)]
+    return False, escapes
+
+
+def touches_block(issue_body, changed_paths):
+    """The machine-readable Touches block for the PR body (ADR-097, #70) — the escape LIST as a
+    fact: `Touches: undeclared`, `Touches-escapes: none`, or `Touches-escapes: <paths>` with
+    governance-marked entries, wrapped in the HTML markers that make the append idempotent."""
+    undeclared, escapes = touches_escapes(parse_touches_footprint(issue_body), changed_paths)
+    if undeclared:
+        line = "Touches: undeclared"
+    elif not escapes:
+        line = "Touches-escapes: none"
+    else:
+        line = "Touches-escapes: " + ",".join(p + _governance_suffix(p) for p in escapes)
+    return "%s\n%s\n%s" % (TOUCHES_BLOCK_BEGIN, line, TOUCHES_BLOCK_END)
+
+
+def append_touches_block(body, block):
+    """Insert `block` into a PR body, REPLACING any previous one (edit-in-place, the
+    `<!-- agent-summary -->` discipline): round 2 rewrites round 1's block instead of stacking a
+    second one. Returns the new body."""
+    body = body or ""
+    if TOUCHES_BLOCK_BEGIN in body:
+        before, _, after_begin = body.partition(TOUCHES_BLOCK_BEGIN)
+        _, _, after_end = after_begin.partition(TOUCHES_BLOCK_END)
+        return before.rstrip() + "\n" + block + after_end
+    body = body.rstrip()
+    return (body + "\n\n" + block) if body else block
+
+
+def _changed_paths(wd, base):
+    """`git diff --name-only <base>..HEAD` → the changed paths, or None when the diff is
+    UNREADABLE (rule #6: a failed probe is not "no changes" — that would fabricate
+    `Touches-escapes: none` for a change set finalize cannot see)."""
+    try:
+        r = subprocess.run(["git", "-C", wd, "diff", "--name-only", "%s..HEAD" % base],
+                           capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        print("touches: git diff failed: %s — block skipped" % e, file=sys.stderr)
+        return None
+    if r.returncode != 0:
+        print("touches: git diff failed: %s — block skipped"
+              % (r.stderr.strip()[-200:] or "exit %s" % r.returncode), file=sys.stderr)
+        return None
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def _fetch_issue_body(gh, slug, issue):
+    """`gh issue view <n> --repo <slug> --json body --jq .body` → the issue body, or None when
+    UNREADABLE (a failed read is not a body without a `Touches:` line — that would land every
+    issue as `Touches: undeclared`)."""
+    r = gh("issue", "view", issue, "--repo", slug, "--json", "body", "--jq", ".body")
+    if r.returncode != 0:
+        print("touches: issue body read FAILED: %s — block skipped"
+              % r.stderr.strip()[-200:], file=sys.stderr)
+        return None
+    return r.stdout or ""
+
+
+def post_touches_block(gh, slug, pr_url, issue):
+    """Compute and append the ADR-097 Touches block to the PR body (#70).
+
+    Deterministic and model-independent — the escape LIST is finalize's fact, computed from git ×
+    the issue's declared footprint; per-escape justification prose stays a recipe instruction.
+    Best-effort like all of bookkeeping: an unreadable input or a refused edit is a stderr line and
+    a normal return — never a failed run, and never a fabricated block."""
+    body = _fetch_issue_body(gh, slug, issue)
+    if body is None:
+        return
+    wd, base, _branch = _resolve_branch()
+    changed = _changed_paths(wd, base)
+    if changed is None:
+        return
+    block = touches_block(body, changed)
+    cur = gh("pr", "view", pr_url, "--json", "body", "--jq", ".body")
+    if cur.returncode != 0:
+        print("touches: PR body read FAILED: %s — block not appended"
+              % cur.stderr.strip()[-160:], file=sys.stderr)
+        return
+    new_body = append_touches_block(cur.stdout, block)
+    if new_body == cur.stdout:
+        return  # already present and unchanged — idempotent across rounds
+    edited = gh("pr", "edit", pr_url, "--body", new_body)
+    if edited.returncode != 0:
+        print("touches: PR body edit FAILED: %s (non-fatal)"
+              % edited.stderr.strip()[-200:], file=sys.stderr)
+        return
+    print("touches: Touches block appended to %s" % pr_url, flush=True)
+
+
 def bookkeeping(stats, log_path):
     """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR from a round that ENDED — arm
     auto-merge (an un-armed PR is invisible to the ENTIRE merge path: updater, review reflex,
@@ -1001,6 +1164,18 @@ def bookkeeping(stats, log_path):
                 except Exception as exc:  # never turn a good ride into a failed one
                     print("bookkeeping: issue-link step errored: %r (non-fatal)" % exc,
                           file=sys.stderr)
+                if route == "arm":
+                    # ADR-097 (homelab#379 worker half / #70): the deterministic Touches block.
+                    # The escape LIST is computed from git × the issue's declared footprint —
+                    # never the model — and appended edit-in-place, idempotently across rounds.
+                    # Rides the ARM leg like the stats channel: a died round holding an earlier
+                    # round's PR leaves the body alone. Same never-fatal discipline as the issue
+                    # link above.
+                    try:
+                        post_touches_block(gh, slug, pr_url, _issue)
+                    except Exception as exc:
+                        print("bookkeeping: touches-block step errored: %r (non-fatal)" % exc,
+                              file=sys.stderr)
             if route == "arm":
                 # ADR-103 leg 2 (#62): the table is the `agent-ride` check-run and the PR gets ONE
                 # appended index line — no more `gh pr comment` per round. `stats_comment_by_pod`

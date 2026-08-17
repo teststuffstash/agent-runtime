@@ -286,7 +286,7 @@ class TestPostTouchesBlockWiring:
 class TestBookkeepingWiresTheBlock:
     """The seam: `bookkeeping()`'s issue leg calls `post_touches_block` on a real PR."""
 
-    def _run(self, af, monkeypatch, logfile, gh, git):
+    def _run(self, af, monkeypatch, logfile, gh, git, exit_status="clean", error_class=""):
         def _fake_run(argv, **kw):
             if argv[0] == "git":
                 return git(argv)
@@ -300,7 +300,8 @@ class TestBookkeepingWiresTheBlock:
         monkeypatch.setenv("REPO_URL", "https://github.com/o/r")
         monkeypatch.setenv("MODEL", "some/model")
         monkeypatch.setenv("AGENT_ROUND", "1")
-        stats = {"pr_url": "https://github.com/o/r/pull/70", "exit_status": "clean", "pod": "p"}
+        stats = {"pr_url": "https://github.com/o/r/pull/70", "exit_status": exit_status,
+                 "error_class": error_class, "pod": "p"}
         af.bookkeeping(stats, logfile("all fine\n"))
         return stats
 
@@ -326,3 +327,12 @@ class TestBookkeepingWiresTheBlock:
         assert gh.pr_body.count(af.TOUCHES_BLOCK_BEGIN) == 1
         assert "Touches-escapes: agent-base/agent-finalize" in gh.pr_body
         assert "Touches-escapes: none" not in gh.pr_body
+
+    def test_a_died_round_leaves_the_body_alone(self, af, monkeypatch, logfile):
+        """The block rides the ARM leg only (like the stats channel): a died round holding an
+        earlier round's PR does not add a second PR-body edit — the strike + issue link own that
+        path, and #49 pins its exact `pr edit` count."""
+        gh = FakeGH(issue_body="Touches: tests/\n", pr_body="Fixes #70\n")
+        self._run(af, monkeypatch, logfile, gh, FakeGit(changed=("agent-base/agent-finalize",)),
+                  exit_status="harness-death", error_class="goose-panic")
+        assert "Touches" not in gh.pr_body
