@@ -2,40 +2,40 @@
   "lockfile_version": "1",
   "packages": {
     "claude-code@latest": {
-      "last_modified": "2026-08-01T16:34:20Z",
-      "resolved": "github:NixOS/nixpkgs/a5cbcfe954791221bfffe2307f7d1a1bf61a871e#claude-code",
+      "last_modified": "2026-08-10T07:49:06Z",
+      "resolved": "github:NixOS/nixpkgs/d482ef84049d9b7276b83a06e4e4d76983830097#claude-code",
       "source": "devbox-search",
-      "version": "2.1.220",
+      "version": "2.1.226",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/fbnnw4ak1s11l8zhx48mps0mvf82bh4c-claude-code-2.1.220",
+              "path": "/nix/store/4md5z6p9d74ljsvwl8iyl03ja96q9gph-claude-code-2.1.226",
               "default": true
             }
           ],
-          "store_path": "/nix/store/fbnnw4ak1s11l8zhx48mps0mvf82bh4c-claude-code-2.1.220"
+          "store_path": "/nix/store/4md5z6p9d74ljsvwl8iyl03ja96q9gph-claude-code-2.1.226"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/hsrdgrp23hjk15qm2b4vz2ib7afiapnn-claude-code-2.1.220",
+              "path": "/nix/store/sjfj9c8jf28c9dmyj79n345v6g09dbkx-claude-code-2.1.226",
               "default": true
             }
           ],
-          "store_path": "/nix/store/hsrdgrp23hjk15qm2b4vz2ib7afiapnn-claude-code-2.1.220"
+          "store_path": "/nix/store/sjfj9c8jf28c9dmyj79n345v6g09dbkx-claude-code-2.1.226"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/wad84rvlsrcs1wq4kkk0dlpblynmspa8-claude-code-2.1.220",
+              "path": "/nix/store/h1472ynlqivxa1mzwjlrc9xhz5hg791s-claude-code-2.1.226",
               "default": true
             }
           ],
-          "store_path": "/nix/store/wad84rvlsrcs1wq4kkk0dlpblynmspa8-claude-code-2.1.220"
+          "store_path": "/nix/store/h1472ynlqivxa1mzwjlrc9xhz5hg791s-claude-code-2.1.226"
         }
       }
     },
@@ -260,8 +260,8 @@
       }
     },
     "github:NixOS/nixpkgs/nixpkgs-unstable": {
-      "last_modified": "2026-08-06T00:10:29Z",
-      "resolved": "github:NixOS/nixpkgs/70ce234312134a463ba7728e94da2486a1d237ac?lastModified=1785975029&narHash=sha256-X44cn5rzytELc3NNoQsh0aLkjWA%2FQzPfc6HPQmsG3sU%3D"
+      "last_modified": "2026-08-14T15:04:01Z",
+      "resolved": "github:NixOS/nixpkgs/8be7bd0c83f12e2e3bbba07c9044d6fed9e66f7f?lastModified=1786719841&narHash=sha256-QcpQOT0NQEFkI77t%2BYXPZqDJc35iIodG7zinieOwFUg%3D"
     },
     "gitleaks@latest": {
       "last_modified": "2026-08-01T16:34:20Z",
@@ -360,8 +360,8 @@
       }
     },
     "jq@latest": {
-      "last_modified": "2026-08-03T09:05:39Z",
-      "resolved": "github:NixOS/nixpkgs/104240a772428cc2e20d8fd86c9ddbb886bbaff2#jq",
+      "last_modified": "2026-08-05T07:53:23Z",
+      "resolved": "github:NixOS/nixpkgs/3a971fa2e67dcb0f2f2cfed2d37e7956567d73d1#jq",
       "source": "devbox-search",
       "version": "1.8.2",
       "systems": {
@@ -432,16 +432,16 @@
               "default": true
             },
             {
+              "name": "dev",
+              "path": "/nix/store/sp8a7n50g32lzzsc7dz09ry2vc9bh4y0-jq-1.8.2-dev"
+            },
+            {
               "name": "doc",
               "path": "/nix/store/dp4rs4vpwp44c7vvgskj1hly0d6xqf2m-jq-1.8.2-doc"
             },
             {
               "name": "out",
               "path": "/nix/store/z438hrlp3j75bpmq87ymzabb8vrda8ps-jq-1.8.2"
-            },
-            {
-              "name": "dev",
-              "path": "/nix/store/sp8a7n50g32lzzsc7dz09ry2vc9bh4y0-jq-1.8.2-dev"
             }
           ],
           "store_path": "/nix/store/4b6f9wb1qak318gk7mxlfkhril6lxpcx-jq-1.8.2-bin"
@@ -514,40 +514,40 @@
       }
     },
     "opencode@latest": {
-      "last_modified": "2026-08-03T00:04:07Z",
-      "resolved": "github:NixOS/nixpkgs/243895692ae2a2fbd08a05141462c0cc0d3ca10f#opencode",
+      "last_modified": "2026-08-06T00:10:29Z",
+      "resolved": "github:NixOS/nixpkgs/70ce234312134a463ba7728e94da2486a1d237ac#opencode",
       "source": "devbox-search",
-      "version": "1.18.11",
+      "version": "1.18.13",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/cdw43d8v2b6xbmpg2hyzcdrzc5pk2rjh-opencode-1.18.11",
+              "path": "/nix/store/zpy3m75gglryd1yaxnz37dfgqyx2imyr-opencode-1.18.13",
               "default": true
             }
           ],
-          "store_path": "/nix/store/cdw43d8v2b6xbmpg2hyzcdrzc5pk2rjh-opencode-1.18.11"
+          "store_path": "/nix/store/zpy3m75gglryd1yaxnz37dfgqyx2imyr-opencode-1.18.13"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/zqcrzyjgg3334w800j9ghpqhkimjfcfc-opencode-1.18.11",
+              "path": "/nix/store/77l47wbws8a5vhxr6hbvcrdqcy1nk2m0-opencode-1.18.13",
               "default": true
             }
           ],
-          "store_path": "/nix/store/zqcrzyjgg3334w800j9ghpqhkimjfcfc-opencode-1.18.11"
+          "store_path": "/nix/store/77l47wbws8a5vhxr6hbvcrdqcy1nk2m0-opencode-1.18.13"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/spgky8n4qc6v28n6z2sp0sdllcg132g3-opencode-1.18.11",
+              "path": "/nix/store/n5h9jhy4ivh30s38y0xp4bhgh8k7ysfk-opencode-1.18.13",
               "default": true
             }
           ],
-          "store_path": "/nix/store/spgky8n4qc6v28n6z2sp0sdllcg132g3-opencode-1.18.11"
+          "store_path": "/nix/store/n5h9jhy4ivh30s38y0xp4bhgh8k7ysfk-opencode-1.18.13"
         }
       }
     },
