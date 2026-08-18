@@ -1068,6 +1068,66 @@ def post_touches_block(gh, slug, pr_url, issue):
     print("touches: Touches block appended to %s" % pr_url, flush=True)
 
 
+# ── homelab#501 worker half (#73): the deterministic PR-open label flip ────────────────────────
+# At PR-open, beside arming auto-merge, flip the source issue out of `agent/in-progress` and into
+# `agent/review` — the deterministic lifecycle edge: today NOTHING writes `agent/review`; it happens
+# only when an LLM session happens to visit, so footprint release is arbitrary. The issue number is
+# read from the STRONG LINK finalize guarantees in the PR body (`Implements #N` / `Fixes #N`,
+# agent-runtime#34), never from the task string. Ordering per homelab IL-T16: add FIRST, remove
+# SECOND — the write is not atomic, and removing first would leave the issue label-less in the
+# window. Idempotent (gh's edit is a no-op for a label already in the target state — the homelab
+# scan belt runs the same flip level-triggered and either side may win the race) and never fatal (a
+# refused write is a stderr line; the belt reconciles within a scan tick, homelab#501 deliverable 1).
+STRONG_LINK_RE = re.compile(r"\b(?:Implements|Fixes)\s+#(\d+)\b")
+
+
+def parse_strong_link(body):
+    """The issue number in finalize's STRONG link (agent-runtime#34): the `Implements #N` line the
+    #32 guarantee maintains, or the recipe's `Fixes #N` — the same link the coordinator scan reads
+    to connect a PR to its issue. `Refs #N` is deliberately NOT strong: it declares a PARTIAL
+    delivery, and only a strong link says the issue's work is actually in the PR. None when absent
+    — a body without a strong link has nothing deterministic to flip (the belt reconciles)."""
+    if not body:
+        return None
+    m = STRONG_LINK_RE.search(body)
+    return m.group(1) if m else None
+
+
+def flip_issue_to_review(gh, slug, pr_url):
+    """Flip the PR's source issue to `agent/review` at PR-open (homelab#501 cause half).
+
+    The issue number comes from the STRONG LINK in the PR body (see `parse_strong_link`), which
+    the #32 guarantee above has already ensured — not from the task string, so the flip tracks the
+    issue the coordinator scan will actually link and release. Ordering per homelab IL-T16:
+    `agent/review` is ADDED before `agent/in-progress` is REMOVED, and a FAILED add skips the remove
+    — a label-less issue (neither in-progress nor review) is the exact state the ordering exists to
+    prevent. Best-effort like every leg: an unreadable body, a missing link, or a refused write is
+    a stderr line and a normal return — the homelab-side scan belt reconciles the flip within a
+    scan tick (homelab#501 deliverable 1)."""
+    cur = gh("pr", "view", pr_url, "--json", "body", "--jq", ".body")
+    if cur.returncode != 0:
+        print("label-flip: PR body read FAILED: %s (belt reconciles)"
+              % cur.stderr.strip()[-200:], file=sys.stderr)
+        return
+    issue = parse_strong_link(cur.stdout)
+    if issue is None:
+        print("label-flip: no strong link in PR body — nothing to flip (belt reconciles)",
+              file=sys.stderr)
+        return
+    added = gh("issue", "edit", issue, "--repo", slug, "--add-label", "agent/review")
+    if added.returncode != 0:
+        print("label-flip: add agent/review FAILED on %s#%s: %s (belt reconciles)"
+              % (slug, issue, added.stderr.strip()[-200:]), file=sys.stderr)
+        return
+    removed = gh("issue", "edit", issue, "--repo", slug, "--remove-label", "agent/in-progress")
+    if removed.returncode != 0:
+        print("label-flip: remove agent/in-progress FAILED on %s#%s: %s (belt reconciles)"
+              % (slug, issue, removed.stderr.strip()[-200:]), file=sys.stderr)
+        return
+    print("label-flip: %s#%s → agent/review (agent/in-progress removed)" % (slug, issue),
+          flush=True)
+
+
 def bookkeeping(stats, log_path):
     """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR from a round that ENDED — arm
     auto-merge (an un-armed PR is invisible to the ENTIRE merge path: updater, review reflex,
@@ -1177,6 +1237,17 @@ def bookkeeping(stats, log_path):
                         print("bookkeeping: touches-block step errored: %r (non-fatal)" % exc,
                               file=sys.stderr)
             if route == "arm":
+                # homelab#501 worker half (#73): at PR-open, flip the source issue to
+                # `agent/review` — add first, remove `agent/in-progress` second (homelab IL-T16).
+                # The issue number is the STRONG LINK in the PR body, which the #32 step above just
+                # guaranteed. Best-effort like every leg: a failed flip is logged and the
+                # homelab-side belt reconciles it within a scan tick.
+                if slug:
+                    try:
+                        flip_issue_to_review(gh, slug, pr_url)
+                    except Exception as exc:  # never turn a good ride into a failed one
+                        print("bookkeeping: label-flip step errored: %r (non-fatal)" % exc,
+                              file=sys.stderr)
                 # ADR-103 leg 2 (#62): the table is the `agent-ride` check-run and the PR gets ONE
                 # appended index line — no more `gh pr comment` per round. `stats_comment_by_pod`
                 # is set inside, and only on a real emission (it suppresses the launcher's
