@@ -230,6 +230,15 @@ class TestAppendTouchesBlock:
         assert "Touches-escapes: agent-base/agent-finalize" in out
         assert "Touches-escapes: none" not in out
 
+    def test_the_round_after_first_insertion_is_byte_identical(self, af):
+        """#72: the first-insert separator (`\n\n`) must match the replace-path separator
+        (`\n`), or the very next call with an UNCHANGED block rewrites the body by whitespace
+        only and fires one spurious `gh pr edit`. Held CONSTANT — the escape set does not move —
+        the round after first insertion must reproduce the body byte-for-byte."""
+        first = af.append_touches_block("Fixes #70\n", self.BLOCK)
+        second = af.append_touches_block(first, self.BLOCK)
+        assert second == first
+
 
 class TestPostTouchesBlockWiring:
     """`post_touches_block(gh, slug, pr_url, issue)` — issue body in, PR body block out."""
@@ -273,6 +282,19 @@ class TestPostTouchesBlockWiring:
         assert gh.pr_body.count(af.TOUCHES_BLOCK_BEGIN) == 1
         assert "Touches-escapes: agent-base/agent-finalize" in gh.pr_body
         assert "Touches-escapes: none" not in gh.pr_body
+
+    def test_an_unchanged_round_issues_no_second_pr_edit(self, af, monkeypatch):
+        """#72, the wiring half: with the escape set held CONSTANT, round 2 is byte-identical,
+        the `new_body == cur.stdout` idempotency check short-circuits, and exactly ONE `pr edit`
+        fires (round 1's) instead of a spurious second one."""
+        gh = FakeGH(issue_body="Touches: tests/\n", pr_body="Fixes #70\n")
+        self._install(af, monkeypatch, gh, FakeGit(changed=("tests/test_a.py",)))
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/70", "70")
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/70", "70")
+        pr_edits = [c for c in gh.calls if c[0][:2] == ("pr", "edit")]
+        assert len(pr_edits) == 1
+        assert "Touches-escapes: none" in gh.pr_body
+        assert gh.pr_body.count(af.TOUCHES_BLOCK_BEGIN) == 1
 
     def test_an_unreadable_diff_skips_not_fabricates(self, af, monkeypatch):
         """Rule #6: a git failure is not "no changes" — that would emit `Touches-escapes: none`
