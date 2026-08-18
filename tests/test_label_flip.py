@@ -220,13 +220,16 @@ class TestBookkeepingWiresTheFlip:
         assert gh.label_edits.index(("add", "73", "agent/review")) < \
             gh.label_edits.index(("remove", "73", "agent/in-progress"))
 
-    def test_the_flip_reads_the_body_link_not_the_task(self, af, monkeypatch, logfile):
-        """The issue number comes from the PR body's strong link, never from `AGENT_TASK`: a task
-        that names a DIFFERENT issue than the PR's own `Fixes #N` flips the PR's issue."""
+    def test_the_flip_consumes_the_strong_link_the_guarantee_maintains(self, af, monkeypatch,
+                                                                      logfile):
+        """The flip reads the PR body's strong link — never the task string (agent-runtime#34).
+        The #32 step runs first and PREPENDS `Implements #N` when the body never named its issue, so
+        even a recipe body that claims a sibling (`Fixes #42`) flips the issue the guarantee made
+        strong — the source issue the coordinator scan will actually release."""
         gh = FakeGH(pr_body="Fixes #42\n")
         self._run(af, monkeypatch, logfile, gh, FakeGit())
-        assert ("add", "42", "agent/review") in gh.label_edits
-        assert not [e for e in gh.label_edits if e[1] == "73"]
+        assert ("add", "73", "agent/review") in gh.label_edits
+        assert not [e for e in gh.label_edits if e[1] == "42"]
 
     def test_a_body_without_a_strong_link_is_left_alone(self, af, monkeypatch, logfile):
         gh = FakeGH(pr_body="Refs #73 — partial delivery.\n")
