@@ -219,7 +219,9 @@ class TestAppendTouchesBlock:
         assert af.append_touches_block("", self.BLOCK) == self.BLOCK
 
     def test_first_append_joins_the_existing_body(self, af):
-        assert af.append_touches_block("Fixes #70\n", self.BLOCK) == "Fixes #70\n\n" + self.BLOCK
+        """#72: a SINGLE newline, matching the replace path — the round after first insertion
+        must reproduce the body byte-for-byte, or it fires a spurious second `gh pr edit`."""
+        assert af.append_touches_block("Fixes #70\n", self.BLOCK) == "Fixes #70\n" + self.BLOCK
 
     def test_a_second_append_replaces_not_stacks(self, af):
         """Round 2 rewrites round 1's block — the marker appears exactly once."""

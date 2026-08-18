@@ -1005,7 +1005,7 @@ def append_touches_block(body, block):
         _, _, after_end = after_begin.partition(TOUCHES_BLOCK_END)
         return before.rstrip() + "\n" + block + after_end
     body = body.rstrip()
-    return (body + "\n\n" + block) if body else block
+    return (body + "\n" + block) if body else block
 
 
 def _changed_paths(wd, base):
