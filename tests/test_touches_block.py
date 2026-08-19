@@ -2,7 +2,8 @@
 
 The worker's JUSTIFICATION of each escape stays a recipe instruction; the LIST is finalize's fact.
 `agent-finalize` computes the ride's escape set — changed paths (`git diff --name-only
-<base>..HEAD`) vs the issue's declared `Touches:` footprint, prefix-intersection with ADR-097
+<base>...HEAD`, MERGE-BASE not base tip — #75) vs the issue's declared `Touches:` footprint,
+prefix-intersection with ADR-097
 semantics (the canonical matcher is homelab `agents/touches-check.sh` / `footprint.sh`, mirrored
 here) — and appends one machine-readable block to the PR body it opens/edits:
 
@@ -89,6 +90,34 @@ class FakeGit:
             if self.fail:
                 return _Done(1, "", "fatal: bad revision\n")
             return _Done(0, "\n".join(self.changed) + ("\n" if self.changed else ""))
+        raise AssertionError("unexpected git argv: %r" % (argv,))
+
+
+class BaseMotionGit(FakeGit):
+    """Emulates git's behavior under the #75 base-motion shape: the PR branch carries its own
+    change while the updater has merged in a moved master that landed an UNRELATED path (via other
+    PRs during the review cycle). A real two-dot diff (`base..HEAD`, base TIP vs HEAD) lists both
+    paths — the unrelated one as a false escape; a real three-dot diff (`base...HEAD`,
+    merge-base vs HEAD) lists only the branch's own work. The fake answers accordingly, so the
+    test passes only if finalize asks for the merge-base form."""
+
+    polluted = ("tests/test_a.py", "docs/agents/agentstack.md")
+    own_work = ("tests/test_a.py",)
+
+    def __call__(self, argv):
+        if "rev-parse" in argv:
+            return _Done(0, "fix/issue-75-merge-base-touches\n")
+        if argv[:5] == ["git", "-C", self.wd, "diff", "--name-only"]:
+            if self.fail:
+                return _Done(1, "", "fatal: bad revision\n")
+            rev = argv[5]
+            if rev.endswith("...HEAD"):
+                changed = self.own_work
+            elif rev.endswith("..HEAD"):
+                changed = self.polluted
+            else:
+                raise AssertionError("unexpected revspec: %r" % (rev,))
+            return _Done(0, "\n".join(changed) + ("\n" if changed else ""))
         raise AssertionError("unexpected git argv: %r" % (argv,))
 
 
@@ -305,6 +334,18 @@ class TestPostTouchesBlockWiring:
         self._install(af, monkeypatch, gh, FakeGit(fail=True))
         af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/70", "70")
         assert "Touches" not in gh.pr_body
+
+    def test_a_base_motion_merge_hides_unrelated_master_paths(self, af, monkeypatch):
+        """#75: `_changed_paths` must diff against the MERGE-BASE, not the base tip. When the
+        updater merges a moved master into the PR branch, a two-dot `base..HEAD` diff sees every
+        path other PRs landed on master during review (the unrelated path below) and emits it as a
+        false escape; the merge-base form `base...HEAD` sees only this PR's own work. The unrelated
+        path must NOT appear in the escape set."""
+        gh = FakeGH(issue_body="Touches: tests/\n", pr_body="Fixes #75\n")
+        self._install(af, monkeypatch, gh, BaseMotionGit())
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/75", "75")
+        assert "docs/agents/agentstack.md" not in gh.pr_body
+        assert "Touches-escapes: none" in gh.pr_body
 
 
 class TestBookkeepingWiresTheBlock:
