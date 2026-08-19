@@ -1009,11 +1009,17 @@ def append_touches_block(body, block):
 
 
 def _changed_paths(wd, base):
-    """`git diff --name-only <base>..HEAD` → the changed paths, or None when the diff is
-    UNREADABLE (rule #6: a failed probe is not "no changes" — that would fabricate
-    `Touches-escapes: none` for a change set finalize cannot see)."""
+    """`git diff --name-only <base>...HEAD` (MERGE-BASE, not base TIP — #75) → the changed paths,
+    or None when the diff is UNREADABLE (rule #6: a failed probe is not "no changes" — that would
+    fabricate `Touches-escapes: none` for a change set finalize cannot see).
+
+    The three-dot form is deliberate. Two-dot (`<base>..HEAD`) compares the base TIP against HEAD,
+    so once the updater workflow merges a moved master into an in-flight PR branch, every path other
+    PRs landed on master during the review cycle shows up as changed and emits a FALSE escape —
+    any of them outside the issue's `Touches:` footprint rides as a narrow- or governance-BLOCKING
+    finding. The merge-base compare (what GitHub's own `.files` reports) sees only this PR's work."""
     try:
-        r = subprocess.run(["git", "-C", wd, "diff", "--name-only", "%s..HEAD" % base],
+        r = subprocess.run(["git", "-C", wd, "diff", "--name-only", "%s...HEAD" % base],
                            capture_output=True, text=True, timeout=30)
     except Exception as e:
         print("touches: git diff failed: %s — block skipped" % e, file=sys.stderr)

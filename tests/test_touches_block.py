@@ -2,7 +2,8 @@
 
 The worker's JUSTIFICATION of each escape stays a recipe instruction; the LIST is finalize's fact.
 `agent-finalize` computes the ride's escape set — changed paths (`git diff --name-only
-<base>..HEAD`) vs the issue's declared `Touches:` footprint, prefix-intersection with ADR-097
+<base>...HEAD`, MERGE-BASE not base tip — #75) vs the issue's declared `Touches:` footprint,
+prefix-intersection with ADR-097
 semantics (the canonical matcher is homelab `agents/touches-check.sh` / `footprint.sh`, mirrored
 here) — and appends one machine-readable block to the PR body it opens/edits:
 
