@@ -414,7 +414,7 @@ def classify(log_path, stats):
     # with no PR and no failure signature. That is a DECISION, not a death: distinct class so
     # the strike/chain-walk machinery never re-runs it on the next model — the coordinator
     # judges the report instead (encodes what #66's coordinator did by hand).
-    if any(k in stats for k in ("ci_passed", "reproduced", "root_cause")):
+    if harness_exit == 0 and any(k in stats for k in ("ci_passed", "reproduced", "root_cause")):
         return "blocked-deliberate", "worker-stop-report"
     if ci_passed is True:
         return "no-artifact", "no-pr"  # green in-pod, no PR, no detectable infra cause
