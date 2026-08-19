@@ -409,17 +409,17 @@ def classify(log_path, stats):
     if not (task.startswith("issue-") or task.startswith("pr-")) and harness_exit == 0 \
             and ci_passed is not False:
         return "clean", ""
-    if ci_passed is True:
-        return "no-artifact", "no-pr"  # green in-pod, no PR, no detectable infra cause
-    if harness_exit != 0:
-        return "failed", "nonzero-exit-%d" % harness_exit
     # Deliberate stop (retro r1 F2, oracle-fleet#66): the worker emitted its structured final
     # report (the contract JSON parsed — ci_passed/reproduced/root_cause present) and exited 0
     # with no PR and no failure signature. That is a DECISION, not a death: distinct class so
     # the strike/chain-walk machinery never re-runs it on the next model — the coordinator
     # judges the report instead (encodes what #66's coordinator did by hand).
-    if any(k in stats for k in ("ci_passed", "reproduced", "root_cause")):
+    if harness_exit == 0 and any(k in stats for k in ("ci_passed", "reproduced", "root_cause")):
         return "blocked-deliberate", "worker-stop-report"
+    if ci_passed is True:
+        return "no-artifact", "no-pr"  # green in-pod, no PR, no detectable infra cause
+    if harness_exit != 0:
+        return "failed", "nonzero-exit-%d" % harness_exit
     return "failed", "no-output"  # goose exited 0 but produced no PR and left no detectable error
 
 

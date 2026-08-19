@@ -86,6 +86,28 @@ class TestNoArtifactPaths:
         s, e = af.classify(logfile("no failures here\n"), {"root_cause": "spec is ambiguous"})
         assert (s, e) == ("blocked-deliberate", "worker-stop-report")
 
+    def test_deliberate_stop_with_ci_passed_is_blocked_deliberate(self, af, logfile, monkeypatch):
+        """Issue #79: a deliberate stop reporting ci_passed=true must be blocked-deliberate.
+
+        A structured report with ci_passed=true means the worker checked and found work already done.
+        Must classify as blocked-deliberate/worker-stop-report to prevent re-riding on next model.
+        """
+        monkeypatch.setenv("AGENT_TASK", "issue-77")
+        s, e = af.classify(logfile("checked and found fixed\n"),
+                           {"ci_passed": True, "reproduced": False, "root_cause": "already fixed"})
+        assert (s, e) == ("blocked-deliberate", "worker-stop-report")
+
+    def test_crash_with_report_is_not_deliberate_stop(self, af, logfile, monkeypatch):
+        """Issue #79 regression: a crash (exit != 0) with a report must stay failed, not become deliberate.
+
+        A structured report is only a deliberate stop if the harness exited cleanly (0).
+        A crash that left a partial report is a real failure and must classify as nonzero-exit-N.
+        """
+        monkeypatch.setenv("AGENT_TASK", "issue-79")
+        monkeypatch.setenv("HARNESS_EXIT", "7")
+        s, e = af.classify(logfile("crashed\n"), {"root_cause": "hit a constraint"})
+        assert (s, e) == ("failed", "nonzero-exit-7")
+
     def test_silent_zero_exit_is_failed(self, af, logfile, monkeypatch):
         monkeypatch.setenv("AGENT_TASK", "issue-7")
         assert af.classify(logfile("nothing useful\n"), {}) == ("failed", "no-output")
