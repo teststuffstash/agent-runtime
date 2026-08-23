@@ -365,6 +365,46 @@ class TestEmitRunStats:
         assert any("repos/o/r/check-runs" in a for (c, _s) in gh.calls for a in c)
 
 
+class TestRunStatsTableRail:
+    """The `rail` row in the run-stats table — agent-runtime#81.
+
+    When stats carries a `rail` key, the table must include a `rail` row showing its value.
+    When stats has no `rail` key, the table must omit the row entirely.
+    """
+
+    STATS = {"pr_url": "https://github.com/o/r/pull/9", "exit_status": "clean",
+             "model": "some/model", "harness": "goose", "cost_usd": 0.42, "duration_s": 128,
+             "ci_passed": True, "pod": "pod-7", "project": "agent-runtime"}
+
+    def test_rail_row_present_when_rail_in_stats(self, af):
+        """AGENT_RAIL set → stats has 'rail' → table includes a rail row."""
+        stats = dict(self.STATS, rail="subscription-fallback")
+        table = af.run_stats_table(stats, "issue-81")
+        assert "| rail | `subscription-fallback` |" in table
+
+    def test_rail_row_absent_when_rail_not_in_stats(self, af):
+        """AGENT_RAIL absent → stats has no 'rail' → table omits the rail row."""
+        stats = dict(self.STATS)
+        table = af.run_stats_table(stats, "issue-81")
+        assert "| rail |" not in table
+
+    def test_rail_row_in_check_run_when_present(self, af):
+        """The rail row rides the check-run output when present."""
+        stats = dict(self.STATS, rail="openrouter")
+        gh = FakeGitHub()
+        af.emit_run_stats(gh, stats, "issue-81", "o/r", now=TS1)
+        summary = gh.check_runs[0]["output"]["summary"]
+        assert "| rail | `openrouter` |" in summary
+
+    def test_rail_row_absent_from_check_run_when_missing(self, af):
+        """No rail row in the check-run output when rail is absent from stats."""
+        stats = dict(self.STATS)
+        gh = FakeGitHub()
+        af.emit_run_stats(gh, stats, "issue-81", "o/r", now=TS1)
+        summary = gh.check_runs[0]["output"]["summary"]
+        assert "| rail |" not in summary
+
+
 class TestBookkeepingUsesTheChannels:
     """The wiring: `bookkeeping()`'s arm leg emits the pair instead of `gh pr comment`.
 
