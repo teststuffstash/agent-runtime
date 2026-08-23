@@ -845,6 +845,7 @@ def run_stats_table(stats, task):
     """The run-stats markdown table — the payload that used to BE a PR comment and is now the
     check-run's output summary. Unchanged bytes (transcripts pointer + cost line included); only
     the channel moved, and the ledger/S3 copy is untouched either way."""
+    rail_row = "| rail | `%s` |\n" % stats["rail"] if "rail" in stats else ""
     return (
         "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
         "| metric | value |\n|---|---|\n"
@@ -853,13 +854,15 @@ def run_stats_table(stats, task):
         "| duration | %ss |\n"
         "| ci_passed | %s |\n"
         "| exit / error_class | `%s` / `%s` |\n"
-        "| node / pod | `%s` / `%s` |\n\n"
-        "\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
+        "| node / pod | `%s` / `%s` |\n"
+        "%s"
+        "\n\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
     ) % (
         stats.get("model", "?"), stats.get("harness", "?"), _cost_cell(stats),
         stats.get("duration_s", 0), stats.get("ci_passed", "?"),
         stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
         stats.get("node", "?"), stats.get("pod", "?"),
+        rail_row,
         stats.get("project", "?"), task or "adhoc",
     )
 
@@ -1656,6 +1659,11 @@ def finalize(log_path):
         "key_hash": os.environ.get("OPENROUTER_KEY_HASH", ""),
         "duration_s": max(0, int(time.time()) - int(start_epoch)) if start_epoch else 0,
     }
+    # agent-runtime#81: fold AGENT_RAIL into the stats line so the run record carries which
+    # billing rail served it. Absent env ⇒ omit the field (never default-guess a rail).
+    rail = os.environ.get("AGENT_RAIL")
+    if rail:
+        stats["rail"] = rail
     # Retro r1 F6: split queue-wait from active run so ledger wall times stop conflating the two
     # (#8's "53.7h task" was days of queue). AGENT_DISPATCH_EPOCH is stamped by the launcher at
     # dispatch; queue_wait = dispatch → pod start, duration_s stays start → finalize.
