@@ -1457,7 +1457,17 @@ def phase_metrics_body(phases):
     `by (phase)` panel quietly grows a second series per ride."""
     if not phases:
         return ""
-    lines = ["# TYPE agent_run_phase_seconds gauge"]
+    # The HELP line is byte-identical with the launcher's (homelab agents/agent-session.sh) ON
+    # PURPOSE: HELP is per metric NAME, and the pushgateway merges every group's copy of the
+    # family on each scrape — a differing (or missing) help string is resolved by picking a
+    # winner and logging the whole ~256KB family per conflicting group pair, per scrape
+    # (prometheus/pushgateway#194). With hundreds of ride groups that was 48GiB/day of log
+    # volume — 98% of everything Loki ingested (homelab#811). Change it only together with the
+    # launcher's copy, never alone.
+    lines = [
+        "# TYPE agent_run_phase_seconds gauge",
+        "# HELP agent_run_phase_seconds Seconds this ride spent in one LAUNCHER-owned phase; the in-pod breakdown belongs to agent-finalize (FU-160).",
+    ]
     for name, seconds in phases.items():
         lines.append('agent_run_phase_seconds{phase="%s"} %s' % (_lv(name), seconds))
     return "\n".join(lines) + "\n"
