@@ -231,10 +231,13 @@ class TestBookkeepingWiresTheFlip:
         assert ("add", "73", "agent/review") in gh.label_edits
         assert not [e for e in gh.label_edits if e[1] == "42"]
 
-    def test_a_body_without_a_strong_link_is_left_alone(self, af, monkeypatch, logfile):
+    def test_a_body_with_only_refs_gets_the_strong_link_prepended_and_flips(self, af, monkeypatch,
+                                                                           logfile):
+        """#87: `Refs #N` is a weak mention — the #32 guarantee prepends `Implements #N`, and
+        then the flip reads the strong link and flips the label."""
         gh = FakeGH(pr_body="Refs #73 — partial delivery.\n")
         self._run(af, monkeypatch, logfile, gh, FakeGit())
-        assert gh.label_edits == []
+        assert ("add", "73", "agent/review") in gh.label_edits
 
     def test_a_died_round_holding_an_earlier_pr_does_not_flip(self, af, monkeypatch, logfile):
         """The flip rides the ARM leg like the touches block and stats channel: a died round's
