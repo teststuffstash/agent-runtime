@@ -41,11 +41,36 @@ class TestFailureSignatures:
         s, e = af.classify(logfile(TRUNCATION_LOG), {})
         assert (s, e) == ("harness-death", "goose-32602-truncation")
 
-    def test_budget_outranks_everything(self, af, logfile):
-        """A dead key dooms the run; the truncation it ends on is a symptom."""
+    def test_budget_account_outranks_everything(self, af, logfile):
+        """Account-credit exhaustion: 402 payment required → budget-exhausted-account."""
         log = TRUNCATION_LOG + "402 payment required\n"
         s, e = af.classify(logfile(log), {})
-        assert (s, e) == ("budget-403", "budget-exhausted")
+        assert (s, e) == ("budget-403", "budget-exhausted-account")
+
+    def test_budget_key_limit(self, af, logfile):
+        """Per-key limit: key limit exceeded → budget-exhausted-key."""
+        s, e = af.classify(logfile("key limit exceeded\n"), {})
+        assert (s, e) == ("budget-403", "budget-exhausted-key")
+
+    def test_budget_residual_does_not_assert_exhaustion(self, af, logfile):
+        """Ambiguous 403 (quota exceeded) → http-403-other, not budget-exhausted-*."""
+        s, e = af.classify(logfile("quota exceeded\n"), {})
+        assert (s, e) == ("budget-403", "http-403-other")
+
+    def test_budget_residual_insufficient_quota(self, af, logfile):
+        """insufficient quota is ambiguous → http-403-other."""
+        s, e = af.classify(logfile("insufficient quota\n"), {})
+        assert (s, e) == ("budget-403", "http-403-other")
+
+    def test_budget_residual_require_more_credit(self, af, logfile):
+        """require more credit is ambiguous → http-403-other."""
+        s, e = af.classify(logfile("requires more credit\n"), {})
+        assert (s, e) == ("budget-403", "http-403-other")
+
+    def test_budget_403_still_death_status(self, af, af_source):
+        """DEATH_EXIT_STATUSES must still contain budget-403 — unchanged contract."""
+        assert "budget-403" in af.DEATH_EXIT_STATUSES
+        assert "budget-exhausted" not in af.DEATH_EXIT_STATUSES
 
     def test_auth_storm_needs_five(self, af, logfile):
         """<5 is a transient token refresh, not a storm."""
