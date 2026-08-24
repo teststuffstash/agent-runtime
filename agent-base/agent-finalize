@@ -240,6 +240,23 @@ def _watchdog_class():
         return ""
 
 
+def _carry_budget_match(text, stats):
+    """Find the first line matching any budget-403 pattern and carry it into stats.
+
+    The AGENT_RUN_STATS line is the only cross-pod conduit; the matched line lets the
+    discriminator survive the pod (homelab#879's third deliverable, #85).
+    """
+    _budget_all = re.compile(
+        r"insufficient (credit|fund)|402 payment|payment required|out of credit|"
+        r"key limit exceeded|"
+        r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    m = _budget_all.search(text)
+    if m:
+        stats["budget_match"] = m.group(0).strip()
+
+
 def failure_signature(text, ci_passed=None, watchdog=""):
     """The dominant machine-detectable failure in a run log → (exit_status, error_class), or None.
 
@@ -264,16 +281,26 @@ def failure_signature(text, ci_passed=None, watchdog=""):
     forbidden = n(r"403 forbidden")
     # OpenRouter budget cap / billing 402 — the retry-into-a-wall class. Precise phrasings only, so
     # legal/statute text containing "credit"/"quota" (2–3 stray hits/run) doesn't trip it.
-    budget = n(r"insufficient (credit|quota|fund)|require[sd]? more credit|payment required|"
-               r"402 payment|quota exceeded|budget exceeded|out of credit|key limit exceeded")
+    # Split into three sub-classes (#85). exit_status stays budget-403 for all three;
+    # the discriminator is in error_class only (agent-runtime#61 + homelab's allow-list).
+    # Account-credit: the account is out of funds (operator top-up needed).
+    # Per-key-limit: the API key's own cap is hit (mint configuration defect).
+    # Residual: ambiguous between the two owners — does NOT assert budget exhaustion.
+    budget_account = n(r"insufficient (credit|fund)|402 payment|payment required|out of credit")
+    budget_key = n(r"key limit exceeded")
+    budget_residual = n(r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded")
     truncation = n(r"-32602|response may have been truncated|maximum context length|"
                    r"context_length_exceeded")
     panic = n(r"thread '.*' panicked|panicked at|fatal runtime error")
     timeout = n(r"context deadline exceeded|operation timed out|request timed out|"
                 r"timeout of \d+\s*ms exceeded")
 
-    if budget:
-        return "budget-403", "budget-exhausted"
+    if budget_account:
+        return "budget-403", "budget-exhausted-account"
+    if budget_key:
+        return "budget-403", "budget-exhausted-key"
+    if budget_residual:
+        return "budget-403", "http-403-other"
     if gitauth and ci_passed is True:
         return "no-artifact", "token-expiry"  # green work, dead git token at push/PR time
     if auth >= 5:
@@ -385,6 +412,11 @@ def classify(log_path, stats):
     # attempt 1). Those runs are `no-artifact` now.
     succeeded = bool(stats.get("pr_url"))
     fail = failure_signature(text, ci_passed, _watchdog_class())
+
+    # #85: carry the matched budget log line into stats so the discriminator survives the pod
+    # (homelab#879's third deliverable). The AGENT_RUN_STATS line is the only cross-pod conduit.
+    if fail and fail[0] == "budget-403":
+        _carry_budget_match(text, stats)
 
     # #36: a DEATH outranks the artifact. `succeeded` used to short-circuit here, before `fail` was
     # consulted at all — and since a fix round always has a PR (that is what a fix round is), from
