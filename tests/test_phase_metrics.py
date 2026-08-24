@@ -199,7 +199,20 @@ class TestPhaseMetricsBody:
     def test_the_contract_shape(self, af):
         body = af.phase_metrics_body({"clone": 12.4})
         assert body == ('# TYPE agent_run_phase_seconds gauge\n'
+                        '# HELP agent_run_phase_seconds Seconds this ride spent in one '
+                        'LAUNCHER-owned phase; the in-pod breakdown belongs to '
+                        'agent-finalize (FU-160).\n'
                         'agent_run_phase_seconds{phase="clone"} 12.4\n')
+
+    def test_help_line_matches_the_launcher_byte_for_byte(self, af):
+        """HELP is per metric NAME: the pushgateway merges every group's copy of the family on
+        each scrape, and a help string differing from the launcher's is logged as a ~256KB
+        inconsistency line per conflicting group pair per scrape — 48GiB/day of Loki ingest
+        before this line existed (homelab#811, prometheus/pushgateway#194)."""
+        body = af.phase_metrics_body({"clone": 1.0})
+        assert ("# HELP agent_run_phase_seconds Seconds this ride spent in one LAUNCHER-owned "
+                "phase; the in-pod breakdown belongs to agent-finalize (FU-160).") in body.splitlines()[1]
+        assert body.count("# HELP") == 1
 
     def test_one_type_line_for_the_whole_family(self, af):
         body = af.phase_metrics_body({"clone": 3.0, "devbox-install": 94.0, "llm-loop": 900.0})
