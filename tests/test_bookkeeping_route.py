@@ -130,7 +130,7 @@ class TestBookkeepingWiring:
     """`bookkeeping()` actually routes on that answer — the pure function is not the bug unless it
     is wired in. Asserts on the `gh` argv the function would have run."""
 
-    def _run(self, af, monkeypatch, log_path, stats):
+    def _run(self, af, monkeypatch, log_path, stats, pr_body="deadbee\n"):
         calls = []
 
         class _Done:
@@ -144,7 +144,7 @@ class TestBookkeepingWiring:
             # not, and `post_summary_event` fails closed on it by design; the channel's own cases
             # live in tests/test_summary_channel.py.
             if argv[1:3] == ["pr", "view"]:
-                return _Done(0, "deadbee\n")
+                return _Done(0, pr_body)
             if "api" in argv and "--method" not in argv:
                 return _Done(0, "[]")
             return _Done()
@@ -213,6 +213,39 @@ class TestBookkeepingWiring:
         assert len(edited) == 1
         assert edited[0][-1].startswith("Implements #49")
         assert stats.get("issue_link_added_by_pod") is True
+
+    def test_issue_link_prepended_when_body_only_has_refs(self, af, monkeypatch, logfile):
+        """#87: `Refs #N` is a weak mention — it must NOT suppress the `Implements #N` prepend
+        because the strong-link readers (scan, goal closeout) require
+        `Implements|Fixes #N`."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="Refs #49\n")
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) == 1, "Implements #49 should be prepended despite Refs #49"
+        assert edited[0][-1].startswith("Implements #49")
+        assert stats.get("issue_link_added_by_pod") is True
+
+    def test_issue_link_not_duplicated_when_implements_present(self, af, monkeypatch, logfile):
+        """#87 idempotency: `Implements #N` is already strong — the prepend must be skipped."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="Implements #49\n")
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) == 0, "Implements #49 already present — no edit needed"
+        assert stats.get("issue_link_added_by_pod") is not True
+
+    def test_issue_link_not_duplicated_when_fixes_present(self, af, monkeypatch, logfile):
+        """#87 idempotency: `Fixes #N` is also strong — the prepend must be skipped."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="Fixes #49\n")
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) == 0, "Fixes #49 already present — no edit needed"
+        assert stats.get("issue_link_added_by_pod") is not True
 
     def test_died_round_respects_no_arm(self, af, monkeypatch, logfile):
         """AGENT_ARM_PR=0 (human-gated roles) must stay un-armed on the death path too — and the
