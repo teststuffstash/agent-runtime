@@ -1002,17 +1002,48 @@ def _governance_suffix(path):
     return "|governance" if path.startswith(GOVERNANCE_PREFIXES) else ""
 
 
+def _is_compelled_counterpart(path):
+    """ADR-097 compelled-counterpart classes (homelab `agents/footprint.sh` `fp_replay_exempt`).
+
+    These paths are exempt from the Touches-escapes emission — they are NOT reviewable
+    governance escapes even when they fall outside the declared footprint. The three patterns
+    (replicated locally; `agents/footprint.sh` in the homelab repo is the upstream source of
+    truth and must be kept in sync):
+
+    - `agents/replay/**`              — any path under `agents/replay/`
+    - `agents/*-test.sh`              — top-level only (`agents/foo-test.sh`, not `agents/foo/bar-test.sh`)
+    - `agents/*-replay.sh`            — top-level only
+    - `docs/agents/*-fsm.yaml`        — top-level only under `docs/agents/`
+    - `docs/agents/*-fsm.md`          — top-level only under `docs/agents/`
+    """
+    if path.startswith("agents/replay/"):
+        return True
+    if path.startswith("agents/") and "/" not in path[len("agents/"):]:
+        rest = path[len("agents/"):]
+        if rest.endswith("-test.sh") or rest.endswith("-replay.sh"):
+            return True
+    if path.startswith("docs/agents/") and "/" not in path[len("docs/agents/"):]:
+        rest = path[len("docs/agents/"):]
+        if rest.endswith("-fsm.yaml") or rest.endswith("-fsm.md"):
+            return True
+    return False
+
+
 def touches_escapes(footprint, changed_paths):
     """The escape set: changed paths that do NOT overlap the declared footprint.
 
     Returns (undeclared, escapes). undeclared=True when `footprint` is None — the issue declared
     no reviewable footprint, so EVERY changed path escapes and the block is `Touches: undeclared`
     (never a path list). Otherwise a changed path escapes iff it does not overlap ANY declared
-    entry — the changed path rides as a singleton footprint entry through the conflict test."""
+    entry — the changed path rides as a singleton footprint entry through the conflict test.
+    ADR-097 compelled-counterpart paths (see `_is_compelled_counterpart`) are exempt from
+    escape reporting — they are not reviewable governance escapes even when outside the
+    declared footprint."""
     if footprint is None:
         return True, list(changed_paths)
     escapes = [p for p in changed_paths
-               if not any(footprint_overlap(_normalize_footprint(p), f) for f in footprint)]
+               if not any(footprint_overlap(_normalize_footprint(p), f) for f in footprint)
+               and not _is_compelled_counterpart(p)]
     return False, escapes
 
 

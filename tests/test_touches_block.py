@@ -202,6 +202,50 @@ class TestTouchesEscapes:
     def test_no_changed_paths_means_no_escapes(self, af):
         assert af.touches_escapes(["tests"], []) == (False, [])
 
+    def test_compelled_counterpart_replay_dir_does_not_escape(self, af):
+        """`agents/replay/**` is a compelled-counterpart — exempt from escape reporting."""
+        undeclared, escapes = af.touches_escapes(
+            ["tests"], ["agents/replay/responder.sh", "tests/test_a.py"])
+        assert (undeclared, escapes) == (False, [])
+
+    def test_compelled_counterpart_top_level_replay_sh_does_not_escape(self, af):
+        """Top-level `agents/*-replay.sh` is a compelled-counterpart — exempt."""
+        undeclared, escapes = af.touches_escapes(
+            ["tests"], ["agents/responder-graduation-replay.sh"])
+        assert (undeclared, escapes) == (False, [])
+
+    def test_compelled_counterpart_top_level_test_sh_does_not_escape(self, af):
+        """Top-level `agents/*-test.sh` is a compelled-counterpart — exempt."""
+        undeclared, escapes = af.touches_escapes(
+            ["tests"], ["agents/coordinator-behaviour-test.sh"])
+        assert (undeclared, escapes) == (False, [])
+
+    def test_compelled_counterpart_subdir_test_sh_still_escapes(self, af):
+        """`agents/*/*-test.sh` is NOT a top-level pattern — it still escapes."""
+        undeclared, escapes = af.touches_escapes(
+            ["tests"], ["agents/coordinator/responder-behaviour-test.sh"])
+        assert (undeclared, escapes) == (False, ["agents/coordinator/responder-behaviour-test.sh"])
+
+    def test_compelled_counterpart_agents_fsm_docs_does_not_escape(self, af):
+        """`docs/agents/*-fsm.yaml` / `docs/agents/*-fsm.md` is a compelled-counterpart — exempt."""
+        undeclared, escapes = af.touches_escapes(
+            ["tests"], ["docs/agents/onboard-fsm.yaml", "docs/agents/onboard-fsm.md"])
+        assert (undeclared, escapes) == (False, [])
+
+    def test_compelled_counterpart_non_exempt_path_still_escapes(self, af):
+        """A genuinely undeclared non-exempt path still emits its path|class entry."""
+        undeclared, escapes = af.touches_escapes(
+            ["tests"], ["agent-base/agent-finalize", "agents/responder-graduation-replay.sh"])
+        assert (undeclared, escapes) == (False, ["agent-base/agent-finalize"])
+
+    def test_compelled_counterpart_undeclared_still_returns_all_paths(self, af):
+        """When the issue is undeclared, the compelled-counterpart paths DO still appear —
+        the exemption only applies to the escape computation, not the undeclared path."""
+        undeclared, escapes = af.touches_escapes(
+            None, ["agents/responder-graduation-replay.sh", "tests/test_a.py"])
+        assert undeclared is True
+        assert escapes == ["agents/responder-graduation-replay.sh", "tests/test_a.py"]
+
 
 class TestTouchesBlock:
     """`touches_block(issue_body, changed_paths)` — the three emitted shapes, delimited."""
@@ -237,6 +281,20 @@ class TestTouchesBlock:
         block = af.touches_block("Touches: tests/\n", ["tests/test_a.py"])
         assert block.startswith(af.TOUCHES_BLOCK_BEGIN)
         assert block.endswith(af.TOUCHES_BLOCK_END)
+
+    def test_compelled_counterpart_replay_sh_emits_none(self, af):
+        """A diff adding a top-level `agents/foo-replay.sh` beside declared work emits
+        `Touches-escapes: none`."""
+        block = af.touches_block("Touches: tests/\n", ["agents/responder-graduation-replay.sh",
+                                                         "tests/test_a.py"])
+        assert "Touches-escapes: none" in block
+
+    def test_compelled_counterpart_non_exempt_path_still_emits_governance(self, af):
+        """A genuinely undeclared non-exempt path still emits its path|class entry."""
+        block = af.touches_block("Touches: tests/\n", ["agent-base/agent-finalize",
+                                                         "agents/responder-graduation-replay.sh"])
+        assert "Touches-escapes: agent-base/agent-finalize" in block
+        assert "agents/responder-graduation-replay.sh" not in block
 
 
 class TestAppendTouchesBlock:
