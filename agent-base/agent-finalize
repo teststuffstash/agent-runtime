@@ -240,16 +240,28 @@ def _watchdog_class():
         return ""
 
 
+# The three budget-403 sub-patterns, defined ONCE and consumed by both failure_signature() and
+# _carry_budget_match() so a future edit to any one of them cannot silently drift the carry out of
+# sync with the classifier (#91). Split into three sub-classes (#85):
+#   Account-credit: the account is out of funds (operator top-up needed).
+#   Per-key-limit: the API key's own cap is hit (mint configuration defect).
+#   Residual: ambiguous between the two owners — does NOT assert budget exhaustion.
+_BUDGET_ACCOUNT_RE = r"insufficient (credit|fund)|402 payment|payment required|out of credit"
+_BUDGET_KEY_RE = r"key limit exceeded"
+_BUDGET_RESIDUAL_RE = r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
+
+
 def _carry_budget_match(text, stats):
     """Find the first line matching any budget-403 pattern and carry it into stats.
 
     The AGENT_RUN_STATS line is the only cross-pod conduit; the matched line lets the
     discriminator survive the pod (homelab#879's third deliverable, #85).
+
+    Consumes the three shared sub-patterns (_BUDGET_ACCOUNT_RE, _BUDGET_KEY_RE,
+    _BUDGET_RESIDUAL_RE) so the carry stays in sync with failure_signature() (#91).
     """
     _budget_all = re.compile(
-        r"insufficient (credit|fund)|402 payment|payment required|out of credit|"
-        r"key limit exceeded|"
-        r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded",
+        _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESIDUAL_RE,
         re.IGNORECASE | re.MULTILINE,
     )
     m = _budget_all.search(text)
@@ -266,6 +278,10 @@ def failure_signature(text, ci_passed=None, watchdog=""):
 
     Precedence: a broken key dooms the whole run, so it outranks the truncation it usually ends on;
     ≥5 auth failures = a storm, not a transient token refresh.
+
+    Budget-403 is split into three sub-classes (#85): account-credit (budget-exhausted-account),
+    per-key-limit (budget-exhausted-key), and residual (http-403-other). The patterns are defined
+    once in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91).
     """
     def n(pat):
         return len(re.findall(pat, text, re.IGNORECASE | re.MULTILINE))
@@ -283,12 +299,10 @@ def failure_signature(text, ci_passed=None, watchdog=""):
     # legal/statute text containing "credit"/"quota" (2–3 stray hits/run) doesn't trip it.
     # Split into three sub-classes (#85). exit_status stays budget-403 for all three;
     # the discriminator is in error_class only (agent-runtime#61 + homelab's allow-list).
-    # Account-credit: the account is out of funds (operator top-up needed).
-    # Per-key-limit: the API key's own cap is hit (mint configuration defect).
-    # Residual: ambiguous between the two owners — does NOT assert budget exhaustion.
-    budget_account = n(r"insufficient (credit|fund)|402 payment|payment required|out of credit")
-    budget_key = n(r"key limit exceeded")
-    budget_residual = n(r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded")
+    # Patterns live in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91).
+    budget_account = n(_BUDGET_ACCOUNT_RE)
+    budget_key = n(_BUDGET_KEY_RE)
+    budget_residual = n(_BUDGET_RESIDUAL_RE)
     truncation = n(r"-32602|response may have been truncated|maximum context length|"
                    r"context_length_exceeded")
     panic = n(r"thread '.*' panicked|panicked at|fatal runtime error")
@@ -413,8 +427,9 @@ def classify(log_path, stats):
     succeeded = bool(stats.get("pr_url"))
     fail = failure_signature(text, ci_passed, _watchdog_class())
 
-    # #85: carry the matched budget log line into stats so the discriminator survives the pod
-    # (homelab#879's third deliverable). The AGENT_RUN_STATS line is the only cross-pod conduit.
+    # #85/#91: carry the matched budget log line into stats so the discriminator survives the pod
+    # (homelab#879's third deliverable). The three sub-classes (account-credit, per-key-limit,
+    # residual) are all carried — the AGENT_RUN_STATS line is the only cross-pod conduit.
     if fail and fail[0] == "budget-403":
         _carry_budget_match(text, stats)
 

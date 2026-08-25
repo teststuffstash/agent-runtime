@@ -92,7 +92,40 @@ class TestFailureSignatures:
         assert (s, e) == ("harness-death", "goose-panic")
 
 
-class TestNoArtifactPaths:
+class TestBudgetCarryDrift:
+    """#91: every budget-403 sub-class must be carried into stats['budget_match'].
+
+    The three budget phrasings are defined ONCE in module-level _BUDGET_*_RE constants consumed
+    by both failure_signature() and _carry_budget_match(). A future edit that updates one but not
+    the other would cause a line the classifier matched to silently NOT be carried into stats —
+    the discriminator's only conduit off the pod, homelab#879 deliverable 3.
+    """
+
+    def test_account_carries_budget_match(self, af, logfile):
+        """Account-credit match (402 payment required) → budget_match in stats."""
+        stats = {}
+        af.classify(logfile("402 payment required\n"), stats)
+        assert "budget_match" in stats, \
+            "account-credit line classified as budget-403 must carry budget_match"
+        assert "402 payment" in stats["budget_match"]
+
+    def test_key_limit_carries_budget_match(self, af, logfile):
+        """Per-key-limit match (key limit exceeded) → budget_match in stats."""
+        stats = {}
+        af.classify(logfile("key limit exceeded\n"), stats)
+        assert "budget_match" in stats, \
+            "key-limit line classified as budget-403 must carry budget_match"
+        assert "key limit exceeded" in stats["budget_match"]
+
+    def test_residual_carries_budget_match(self, af, logfile):
+        """Residual match (quota exceeded) → budget_match in stats."""
+        stats = {}
+        af.classify(logfile("quota exceeded\n"), stats)
+        assert "budget_match" in stats, \
+            "residual line classified as budget-403 must carry budget_match"
+        assert "quota exceeded" in stats["budget_match"]
+
+    
     def test_adhoc_ride_expects_no_pr(self, af, logfile, monkeypatch):
         """A validation ride is not an issue-*/pr-* task; no PR is its normal clean end."""
         monkeypatch.setenv("AGENT_TASK", "validate-something")
