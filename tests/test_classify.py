@@ -125,7 +125,6 @@ class TestBudgetCarryDrift:
             "residual line classified as budget-403 must carry budget_match"
         assert "quota exceeded" in stats["budget_match"]
 
-    
     def test_adhoc_ride_expects_no_pr(self, af, logfile, monkeypatch):
         """A validation ride is not an issue-*/pr-* task; no PR is its normal clean end."""
         monkeypatch.setenv("AGENT_TASK", "validate-something")
@@ -240,3 +239,14 @@ class TestDerivedPrUrlMasksDeath:
         log = "fatal: could not read Username for 'https://github.com'\n"
         s, e = af.classify(logfile(log), {"pr_url": "http://x/1", "ci_passed": True})
         assert (s, e) == ("clean", "")
+
+
+def test_no_trailing_whitespace():
+    """Test file must not have trailing whitespace on any line."""
+    import pathlib
+    test_file = pathlib.Path(__file__)
+    with open(test_file, 'rb') as f:
+        for line_num, line in enumerate(f, 1):
+            line_str = line.rstrip(b'\n\r')
+            assert line_str == line_str.rstrip(), \
+                f"Line {line_num} has trailing whitespace"
