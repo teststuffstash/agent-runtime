@@ -125,7 +125,6 @@ class TestBudgetCarryDrift:
             "residual line classified as budget-403 must carry budget_match"
         assert "quota exceeded" in stats["budget_match"]
 
-    
     def test_adhoc_ride_expects_no_pr(self, af, logfile, monkeypatch):
         """A validation ride is not an issue-*/pr-* task; no PR is its normal clean end."""
         monkeypatch.setenv("AGENT_TASK", "validate-something")
