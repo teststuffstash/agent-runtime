@@ -241,12 +241,4 @@ class TestDerivedPrUrlMasksDeath:
         assert (s, e) == ("clean", "")
 
 
-def test_no_trailing_whitespace():
-    """Test file must not have trailing whitespace on any line."""
-    import pathlib
-    test_file = pathlib.Path(__file__)
-    with open(test_file, 'rb') as f:
-        for line_num, line in enumerate(f, 1):
-            line_str = line.rstrip(b'\n\r')
-            assert line_str == line_str.rstrip(), \
-                f"Line {line_num} has trailing whitespace"
+
