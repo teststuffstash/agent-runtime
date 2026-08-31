@@ -405,7 +405,7 @@ def bookkeeping_route(stats):
 def classify(log_path, stats):
     """Classify the run into (exit_status, error_class) — the FU-057 enabler.
 
-    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | failed
+    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | input-unreadable | failed
     error_class = the dominant machine-detectable cause ('' when clean). Derived from run.log
     patterns + the run's OUTCOME (did it open a PR / pass CI). This is what makes the model-blacklist
     call possible (docs/agents/observability-and-retro.md §B1): the ledger needs to know *why* a run
