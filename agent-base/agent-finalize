@@ -1314,6 +1314,13 @@ def bookkeeping(stats, log_path):
             # master it would make the PR close an issue the goal lane still owns. This line exists
             # to satisfy the scan's regex, NOT to change what merging does.
             # ⚖ Match, do not duplicate; prepend, do not rewrite; never fatal.
+            # ── CLOSING-KEYWORD LINT (#107) ──────────────────────────────────────────────────
+            # Two belts, one site:
+            #   1. `fixes|closes|resolves #N` where #N resolves to a PR → rewrite to `Refs #N`.
+            #      A closing keyword aimed at a PR is never intended (oracle-fleet#317).
+            #   2. On a default-branch-based PR, use `Fixes` (not `Implements`) for the issue
+            #      link — closing keywords are inert off the default branch, so `Fixes` is safe
+            #      universally (oracle-fleet#312).
             if task.startswith("issue-") and slug:
                 _issue = task[len("issue-"):]
                 try:
@@ -1321,20 +1328,52 @@ def bookkeeping(stats, log_path):
                     if _cur.returncode != 0:
                         print("bookkeeping: issue-link read FAILED: %s (scan may re-dispatch %s#%s)"
                               % (_cur.stderr.strip()[-160:], slug, _issue), file=sys.stderr)
-                    elif re.search(r"\b(?:Implements|Fixes)\s+#%s\b" % re.escape(_issue), _cur.stdout):
-                        print("bookkeeping: issue link already present (#%s) — left alone" % _issue,
-                              flush=True)
                     else:
-                        _new = "Implements #%s\n\n%s" % (_issue, _cur.stdout)
-                        _ed = gh("pr", "edit", pr_url, "--body", _new)
-                        if _ed.returncode == 0:
-                            print("bookkeeping: issue link ADDED (Implements #%s) — the PR body did "
-                                  "not name its issue" % _issue, flush=True)
-                            stats["issue_link_added_by_pod"] = True
+                        _body = _cur.stdout
+                        # ── Fix 1 (#107): rewrite closing keywords aimed at PRs ──
+                        def _rewrite_pr_closer(m):
+                            num = m.group(2)
+                            r = gh("pr", "view", num, "--repo", slug,
+                                   "--json", "number", "--jq", ".number", timeout=10)
+                            if r.returncode == 0 and r.stdout.strip():
+                                print("bookkeeping: closing keyword '%s #%s' targets a PR — "
+                                      "rewriting to 'Refs #%s'"
+                                      % (m.group(1), num, num), flush=True)
+                                return "Refs #%s" % num
+                            return m.group(0)
+                        _body = re.sub(
+                            r"\b(fixes|closes|resolves)\s+#(\d+)\b",
+                            _rewrite_pr_closer, _body, flags=re.IGNORECASE
+                        )
+                        if _body != _cur.stdout:
+                            _ed = gh("pr", "edit", pr_url, "--body", _body)
+                            if _ed.returncode != 0:
+                                print("bookkeeping: closing-keyword rewrite edit FAILED: %s"
+                                      % _ed.stderr.strip()[-160:], file=sys.stderr)
+                        # ── Fix 2 (#107): use Fixes on default-branch PRs ──
+                        _link_keyword = "Implements"
+                        _pr_info = gh("pr", "view", pr_url, "--json",
+                                       "baseRefName", "--jq", ".baseRefName")
+                        if _pr_info.returncode == 0:
+                            _base = _pr_info.stdout.strip()
+                            _default = gh("repo", "view", slug,
+                                          "--json", "defaultBranch", "--jq", ".defaultBranch")
+                            if _default.returncode == 0 and _default.stdout.strip() == _base:
+                                _link_keyword = "Fixes"
+                        if re.search(r"\b(?:Implements|Fixes)\s+#%s\b" % re.escape(_issue), _body):
+                            print("bookkeeping: issue link already present (#%s) — left alone"
+                                  % _issue, flush=True)
                         else:
-                            print("bookkeeping: issue-link edit FAILED: %s (scan may re-dispatch "
-                                  "%s#%s)" % (_ed.stderr.strip()[-160:], slug, _issue),
-                                  file=sys.stderr)
+                            _new = "%s #%s\n\n%s" % (_link_keyword, _issue, _body)
+                            _ed = gh("pr", "edit", pr_url, "--body", _new)
+                            if _ed.returncode == 0:
+                                print("bookkeeping: issue link ADDED (%s #%s) — the PR body did "
+                                      "not name its issue" % (_link_keyword, _issue), flush=True)
+                                stats["issue_link_added_by_pod"] = True
+                            else:
+                                print("bookkeeping: issue-link edit FAILED: %s (scan may re-dispatch "
+                                      "%s#%s)" % (_ed.stderr.strip()[-160:], slug, _issue),
+                                      file=sys.stderr)
                 except Exception as exc:  # never turn a good ride into a failed one
                     print("bookkeeping: issue-link step errored: %r (non-fatal)" % exc,
                           file=sys.stderr)
