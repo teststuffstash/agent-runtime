@@ -76,12 +76,15 @@ class FakeGH:
 
 class FakeGit:
     """In-memory git for the wiring tests: the changed-paths diff plus the rev-parse seam
-    `_resolve_branch` needs. `fail=True` makes the DIFF unreadable (never the rev-parse)."""
+    `_resolve_branch` needs. `fail=True` makes the FETCH unreadable (never the rev-parse);
+    `fail_diff=True` makes the DIFF unreadable after a successful fetch."""
 
-    def __init__(self, changed=("tests/test_a.py",), wd="/work/repo", fail=False):
+    def __init__(self, changed=("tests/test_a.py",), wd="/work/repo", fail=False,
+                 fail_diff=False):
         self.changed = list(changed)
         self.wd = wd
         self.fail = fail
+        self.fail_diff = fail_diff
 
     def __call__(self, argv):
         if "rev-parse" in argv:
@@ -93,7 +96,8 @@ class FakeGit:
                 return _Done(1, "", "fatal: could not fetch origin\n")
             return _Done(0, "")
         if argv[:5] == ["git", "-C", self.wd, "diff", "--name-only"]:
-            if self.fail:
+            # #102: fail_diff tests the diff-fails-after-successful-fetch branch independently.
+            if self.fail or self.fail_diff:
                 return _Done(1, "", "fatal: bad revision\n")
             return _Done(0, "\n".join(self.changed) + ("\n" if self.changed else ""))
         raise AssertionError("unexpected git argv: %r" % (argv,))
@@ -469,6 +473,14 @@ class TestPostTouchesBlockWiring:
         git = StaleBaseGit(fail=True)
         self._install(af, monkeypatch, gh, git)
         af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/97", "97")
+        assert "Touches" not in gh.pr_body
+
+    def test_an_unreadable_diff_after_fetch_skips_not_fabricates(self, af, monkeypatch):
+        """#102: the diff-fails-after-successful-fetch return-None branch is independently
+        tested — fetch succeeds, diff fails, block skipped (not `escapes: none`)."""
+        gh = FakeGH()
+        self._install(af, monkeypatch, gh, FakeGit(fail_diff=True))
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/70", "70")
         assert "Touches" not in gh.pr_body
 
 
