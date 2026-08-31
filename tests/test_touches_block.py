@@ -86,6 +86,12 @@ class FakeGit:
     def __call__(self, argv):
         if "rev-parse" in argv:
             return _Done(0, "fix/issue-70-touches-escapes\n")
+        if argv[:4] == ["git", "-C", self.wd, "fetch"]:
+            # #97: _changed_paths now fetches origin/<base> before the diff.
+            # A fetch failure degrades to "block skipped" (returns None).
+            if self.fail:
+                return _Done(1, "", "fatal: could not fetch origin\n")
+            return _Done(0, "")
         if argv[:5] == ["git", "-C", self.wd, "diff", "--name-only"]:
             if self.fail:
                 return _Done(1, "", "fatal: bad revision\n")
@@ -107,6 +113,11 @@ class BaseMotionGit(FakeGit):
     def __call__(self, argv):
         if "rev-parse" in argv:
             return _Done(0, "fix/issue-75-merge-base-touches\n")
+        if argv[:4] == ["git", "-C", self.wd, "fetch"]:
+            # #97: _changed_paths now fetches origin/<base> before the diff.
+            if self.fail:
+                return _Done(1, "", "fatal: could not fetch origin\n")
+            return _Done(0, "")
         if argv[:5] == ["git", "-C", self.wd, "diff", "--name-only"]:
             if self.fail:
                 return _Done(1, "", "fatal: bad revision\n")
@@ -114,6 +125,38 @@ class BaseMotionGit(FakeGit):
             if rev.endswith("...HEAD"):
                 changed = self.own_work
             elif rev.endswith("..HEAD"):
+                changed = self.polluted
+            else:
+                raise AssertionError("unexpected revspec: %r" % (rev,))
+            return _Done(0, "\n".join(changed) + ("\n" if changed else ""))
+        raise AssertionError("unexpected git argv: %r" % (argv,))
+
+
+class StaleBaseGit(FakeGit):
+    """Emulates git's behavior under the #97 stale-base shape: the pod's local `master` was
+    fetched at clone time and is stale — a newer commit landed on origin/master during the
+    review cycle, and the updater merged it into the PR branch. A diff against the stale local
+    `master...HEAD` sees the unrelated path as a false escape (merge-base is the old fork point);
+    a diff against `origin/master...HEAD` (after a fresh fetch) sees only the branch's own work.
+    The fake answers accordingly, so the test passes only if finalize fetches origin and uses the
+    origin-qualified ref."""
+
+    polluted = ("tests/test_a.py", "docs/agents/agentstack.md")
+    own_work = ("tests/test_a.py",)
+
+    def __call__(self, argv):
+        if "rev-parse" in argv:
+            return _Done(0, "fix/issue-97-stale-base\n")
+        if argv[:4] == ["git", "-C", self.wd, "fetch"]:
+            # git fetch origin master — succeeds
+            return _Done(0, "")
+        if argv[:5] == ["git", "-C", self.wd, "diff", "--name-only"]:
+            if self.fail:
+                return _Done(1, "", "fatal: bad revision\n")
+            rev = argv[5]
+            if rev == "origin/master...HEAD":
+                changed = self.own_work
+            elif rev == "master...HEAD":
                 changed = self.polluted
             else:
                 raise AssertionError("unexpected revspec: %r" % (rev,))
@@ -404,6 +447,29 @@ class TestPostTouchesBlockWiring:
         af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/75", "75")
         assert "docs/agents/agentstack.md" not in gh.pr_body
         assert "Touches-escapes: none" in gh.pr_body
+
+    def test_a_stale_base_fetch_hides_unrelated_master_paths(self, af, monkeypatch):
+        """#97: `_changed_paths` must diff against `origin/<base>` (fetched current), not the
+        stale local `<base>`. When the pod's local base ref is stale (behind origin) and the
+        updater has merged the newer origin/master into the branch, a diff against the local ref
+        sees every path other PRs landed on master during review and emits them as false escapes;
+        diffing against the freshly-fetched `origin/<base>` sees only this PR's own work. The
+        merged-in paths must NOT appear in the escape set."""
+        gh = FakeGH(issue_body="Touches: tests/\n", pr_body="Fixes #97\n")
+        self._install(af, monkeypatch, gh, StaleBaseGit())
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/97", "97")
+        assert "docs/agents/agentstack.md" not in gh.pr_body
+        assert "Touches-escapes: none" in gh.pr_body
+
+    def test_a_stale_base_fetch_failure_skips_block(self, af, monkeypatch):
+        """#97: when `git fetch origin <base>` fails, `_changed_paths` must return None (block
+        skipped) — a failed fetch must not silently fall back to the stale local ref and present
+        a stale-ref answer as fact."""
+        gh = FakeGH(issue_body="Touches: tests/\n", pr_body="Fixes #97\n")
+        git = StaleBaseGit(fail=True)
+        self._install(af, monkeypatch, gh, git)
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/97", "97")
+        assert "Touches" not in gh.pr_body
 
 
 class TestBookkeepingWiresTheBlock:

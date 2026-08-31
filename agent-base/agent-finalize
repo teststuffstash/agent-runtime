@@ -1097,17 +1097,37 @@ def append_touches_block(body, block):
 
 
 def _changed_paths(wd, base):
-    """`git diff --name-only <base>...HEAD` (MERGE-BASE, not base TIP — #75) → the changed paths,
-    or None when the diff is UNREADABLE (rule #6: a failed probe is not "no changes" — that would
-    fabricate `Touches-escapes: none` for a change set finalize cannot see).
+    """`git diff --name-only origin/<base>...HEAD` (MERGE-BASE against the CURRENT base ref,
+    not a stale local ref — #75, #97) → the changed paths, or None when the diff is UNREADABLE
+    (rule #6: a failed probe is not "no changes" — that would fabricate `Touches-escapes: none`
+    for a change set finalize cannot see).
 
-    The three-dot form is deliberate. Two-dot (`<base>..HEAD`) compares the base TIP against HEAD,
-    so once the updater workflow merges a moved master into an in-flight PR branch, every path other
-    PRs landed on master during the review cycle shows up as changed and emits a FALSE escape —
-    any of them outside the issue's `Touches:` footprint rides as a narrow- or governance-BLOCKING
-    finding. The merge-base compare (what GitHub's own `.files` reports) sees only this PR's work."""
+    The three-dot form is deliberate (see #75). Two-dot (`<base>..HEAD`) compares the base TIP
+    against HEAD, so once the updater workflow merges a moved master into an in-flight PR branch,
+    every path other PRs landed on master during the review cycle shows up as changed and emits a
+    FALSE escape — any of them outside the issue's `Touches:` footprint rides as a narrow- or
+    governance-BLOCKING finding. The merge-base compare (what GitHub's own `.files` reports) sees
+    only this PR's work.
+
+    The origin-qualified ref is also deliberate (#97). The pod's local `<base>` ref was fetched at
+    clone time and may be stale — a newer commit may have landed on origin/<base> during the review
+    cycle, and the updater may have merged it into the branch. A diff against the stale local ref
+    would then compute the merge-base against the old fork point and emit every path the newer
+    commit introduced as false escapes. Fetching origin/<base> immediately before the diff ensures
+    the merge-base is computed against the current state of the base branch. A failed fetch degrades
+    to "block skipped" (returns None), never a stale-ref answer presented as fact."""
     try:
-        r = subprocess.run(["git", "-C", wd, "diff", "--name-only", "%s...HEAD" % base],
+        f = subprocess.run(["git", "-C", wd, "fetch", "origin", base],
+                           capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        print("touches: git fetch failed: %s — block skipped" % e, file=sys.stderr)
+        return None
+    if f.returncode != 0:
+        print("touches: git fetch failed: %s — block skipped"
+              % (f.stderr.strip()[-200:] or "exit %s" % f.returncode), file=sys.stderr)
+        return None
+    try:
+        r = subprocess.run(["git", "-C", wd, "diff", "--name-only", "origin/%s...HEAD" % base],
                            capture_output=True, text=True, timeout=30)
     except Exception as e:
         print("touches: git diff failed: %s — block skipped" % e, file=sys.stderr)
