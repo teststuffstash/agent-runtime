@@ -130,7 +130,8 @@ class TestBookkeepingWiring:
     """`bookkeeping()` actually routes on that answer — the pure function is not the bug unless it
     is wired in. Asserts on the `gh` argv the function would have run."""
 
-    def _run(self, af, monkeypatch, log_path, stats, pr_body="deadbee\n"):
+    def _run(self, af, monkeypatch, log_path, stats, pr_body="deadbee\n",
+             is_pr=None, base_branch="goal/foo", default_branch="main"):
         calls = []
 
         class _Done:
@@ -139,13 +140,27 @@ class TestBookkeepingWiring:
 
         def _fake_run(argv, **kw):
             calls.append(tuple(argv))
+            args = tuple(argv)
+            # PR body read: gh pr view <url> --json body --jq .body
+            if args[1:3] == ("pr", "view") and "--json" in args and "body" in args:
+                return _Done(0, pr_body)
+            # PR check (#107): gh pr view <num> --repo <slug> --json number --jq .number
+            if args[1:3] == ("pr", "view") and "--repo" in args and "number" in args:
+                num = args[3]
+                if is_pr and num in is_pr:
+                    return _Done(0, num)
+                return _Done(1, "")
+            # Base branch check (#107): gh pr view <url> --json baseRefName --jq .baseRefName
+            if args[1:3] == ("pr", "view") and "baseRefName" in args:
+                return _Done(0, base_branch)
+            # Default branch check (#107): gh repo view <slug> --json defaultBranch --jq .defaultBranch
+            if args[1:3] == ("repo", "view") and "defaultBranch" in args:
+                return _Done(0, default_branch)
             # Canned answers for the two ADR-103 reads (#62), so the arm leg gets far enough to
             # emit its channels here too. `[]` is a READABLE empty timeline — an empty stdout is
             # not, and `post_summary_event` fails closed on it by design; the channel's own cases
             # live in tests/test_summary_channel.py.
-            if argv[1:3] == ["pr", "view"]:
-                return _Done(0, pr_body)
-            if "api" in argv and "--method" not in argv:
+            if "api" in args and "--method" not in args:
                 return _Done(0, "[]")
             return _Done()
 
@@ -256,3 +271,55 @@ class TestBookkeepingWiring:
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
         assert not self._find(calls, "pr", "merge")
         assert stats.get("armed_by_pod") is False
+
+    # ── #107: closing-keyword lint ─────────────────────────────────────────────────────────────
+
+    def test_closing_keyword_aimed_at_pr_rewrites_to_refs(self, af, monkeypatch, logfile):
+        """#107 Fix 1: `Fixes #309` where #309 is a PR → rewrite to `Refs #309` in the body."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="Fixes #309\n", is_pr={"309"})
+        # Should have edited the body to rewrite Fixes #309 → Refs #309
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) >= 1
+        body_arg = edited[0][-1]
+        assert "Refs #309" in body_arg
+        assert "Fixes #309" not in body_arg
+
+    def test_closing_keyword_aimed_at_issue_left_alone(self, af, monkeypatch, logfile):
+        """#107 Fix 1: `Fixes #107` where #107 is an issue (not a PR) → left alone."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="Fixes #107\n", is_pr=set())
+        # The body should NOT have been edited for the closing keyword (no PR match)
+        # But the issue link prepend may still happen
+        edited = self._find(calls, "pr", "edit")
+        for body in (e[-1] for e in edited):
+            assert "Fixes #107" in body, (
+                "Fixes #107 should remain as-is when #107 is not a PR")
+
+    def test_default_branch_pr_uses_fixes_not_implements(self, af, monkeypatch, logfile):
+        """#107 Fix 2: on a default-branch-based PR, the issue link uses `Fixes` not `Implements`."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="some body\n", base_branch="main", default_branch="main")
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) >= 1
+        body_arg = edited[0][-1]
+        assert body_arg.startswith("Fixes #49"), (
+            "Default-branch PR should use Fixes, got: %s" % body_arg[:30])
+
+    def test_non_default_branch_pr_uses_implements(self, af, monkeypatch, logfile):
+        """#107 Fix 2: on a non-default-branch PR, the issue link uses `Implements`."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="some body\n", base_branch="goal/foo", default_branch="main")
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) >= 1
+        body_arg = edited[0][-1]
+        assert body_arg.startswith("Implements #49"), (
+            "Non-default-branch PR should use Implements, got: %s" % body_arg[:30])
