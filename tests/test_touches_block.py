@@ -471,6 +471,14 @@ class TestPostTouchesBlockWiring:
         af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/97", "97")
         assert "Touches" not in gh.pr_body
 
+    def test_an_unreadable_diff_after_fetch_skips_not_fabricates(self, af, monkeypatch):
+        """#102: the diff-fails-after-successful-fetch return-None branch is independently
+        tested — fetch succeeds, diff fails, block skipped (not `escapes: none`)."""
+        gh = FakeGH()
+        self._install(af, monkeypatch, gh, FakeGit(fail_diff=True))
+        af.post_touches_block(gh, "o/r", "https://github.com/o/r/pull/70", "70")
+        assert "Touches" not in gh.pr_body
+
 
 class TestBookkeepingWiresTheBlock:
     """The seam: `bookkeeping()`'s issue leg calls `post_touches_block` on a real PR."""
