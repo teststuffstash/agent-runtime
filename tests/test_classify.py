@@ -302,6 +302,26 @@ class TestInputUnreadable:
         s, e = af.classify(logfile(log), {})
         assert (s, e) == ("input-unreadable", "rate-limit")
 
+    def test_docstring_enum_lists_input_unreadable(self, af_source):
+        """classify() docstring must list input-unreadable in the exit_status enum.
+
+        Issue #105: the docstring contract at classify() was not updated when
+        input-unreadable was added as a real return value.
+        """
+        assert "input-unreadable" in af_source, \
+            "input-unreadable must appear somewhere in agent-finalize source"
+
+        # Find the docstring enum line and verify input-unreadable is listed
+        import re
+        match = re.search(
+            r"exit_status\s*∈\s*.*",
+            af_source,
+        )
+        assert match is not None, "Could not find exit_status enum line in docstring"
+        enum_line = match.group(0)
+        assert "input-unreadable" in enum_line, \
+            f"input-unreadable missing from exit_status enum: {enum_line!r}"
+
     def test_unrelated_provider_rate_limit_is_not_input_unreadable(self, af, logfile):
         """An unrelated LLM-provider 429 (no GraphQL:/installation ID) must NOT classify as input-unreadable.
 
