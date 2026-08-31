@@ -131,7 +131,7 @@ class TestBookkeepingWiring:
     is wired in. Asserts on the `gh` argv the function would have run."""
 
     def _run(self, af, monkeypatch, log_path, stats, pr_body="deadbee\n",
-             is_pr=None, base_branch="main", default_branch="main"):
+             is_pr=None, base_branch="goal/foo", default_branch="main"):
         calls = []
 
         class _Done:
