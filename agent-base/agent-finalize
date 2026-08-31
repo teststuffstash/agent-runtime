@@ -303,6 +303,11 @@ def failure_signature(text, ci_passed=None, watchdog=""):
     budget_account = n(_BUDGET_ACCOUNT_RE)
     budget_key = n(_BUDGET_KEY_RE)
     budget_residual = n(_BUDGET_RESIDUAL_RE)
+    # homelab#1069 / agent-runtime#99: a rate-limited `gh issue view` (the round's directive
+    # channel) means the round could not read its arbitration comment. Distinct class so the
+    # infra failure is never counted as a completed round. Outranks truncation/auth-storm
+    # because a directive read failure dooms the round before any work can begin.
+    ratelimit = n(r"rate limit already exceeded|API rate limit")
     truncation = n(r"-32602|response may have been truncated|maximum context length|"
                    r"context_length_exceeded")
     panic = n(r"thread '.*' panicked|panicked at|fatal runtime error")
@@ -315,6 +320,8 @@ def failure_signature(text, ci_passed=None, watchdog=""):
         return "budget-403", "budget-exhausted-key"
     if budget_residual:
         return "budget-403", "http-403-other"
+    if ratelimit:
+        return "input-unreadable", "rate-limit"
     if gitauth and ci_passed is True:
         return "no-artifact", "token-expiry"  # green work, dead git token at push/PR time
     if auth >= 5:
@@ -365,7 +372,7 @@ def died_this_round(fail, stats):
 # contradicts. `bookkeeping` reads these instead of re-deriving the predicate: by the time it runs,
 # `classify` has already put `died_this_round`'s answer into `stats["exit_status"]`, and re-running
 # the signature match over the log there would be a second place for the two to disagree.
-DEATH_EXIT_STATUSES = ("harness-death", "auth-storm", "budget-403", "timeout")
+DEATH_EXIT_STATUSES = ("harness-death", "auth-storm", "budget-403", "timeout", "input-unreadable")
 
 
 def bookkeeping_route(stats):
