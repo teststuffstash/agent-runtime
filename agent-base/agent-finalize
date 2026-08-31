@@ -307,7 +307,7 @@ def failure_signature(text, ci_passed=None, watchdog=""):
     # channel) means the round could not read its arbitration comment. Distinct class so the
     # infra failure is never counted as a completed round. Outranks truncation/auth-storm
     # because a directive read failure dooms the round before any work can begin.
-    ratelimit = n(r"rate limit already exceeded|API rate limit")
+    ratelimit = n(r"GraphQL:\s*API rate limit|API rate limit.*installation ID")
     truncation = n(r"-32602|response may have been truncated|maximum context length|"
                    r"context_length_exceeded")
     panic = n(r"thread '.*' panicked|panicked at|fatal runtime error")

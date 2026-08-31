@@ -302,5 +302,20 @@ class TestInputUnreadable:
         s, e = af.classify(logfile(log), {})
         assert (s, e) == ("input-unreadable", "rate-limit")
 
+    def test_unrelated_provider_rate_limit_is_not_input_unreadable(self, af, logfile):
+        """An unrelated LLM-provider 429 (no GraphQL:/installation ID) must NOT classify as input-unreadable.
+
+        The unanchored regex would match 'rate limit already exceeded' from an OpenRouter
+        response after the directive was read fine, mislabelling it input-unreadable instead
+        of its true cause (e.g. budget-403 or harness-death).
+        """
+        log = (
+            "OpenRouter: rate limit already exceeded for model deepseek-v4\n"
+            "retrying in 30s\n"
+        )
+        s, e = af.classify(logfile(log), {})
+        assert (s, e) != ("input-unreadable", "rate-limit"), \
+            "An unrelated provider 429 must not be classified as input-unreadable"
+
 
 
