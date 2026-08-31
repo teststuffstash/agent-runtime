@@ -241,4 +241,66 @@ class TestDerivedPrUrlMasksDeath:
         assert (s, e) == ("clean", "")
 
 
+class TestInputUnreadable:
+    """homelab#1069 / agent-runtime#99: a failed directive read (rate-limited issue/comments)
+    must not exit clean — typed input-unreadable class.
+
+    When `gh issue view` or `gh issue view --json comments` fails with a rate-limit error,
+    the round cannot read its directive (the arbitration comment). It must classify as
+    input-unreadable/rate-limit, never clean.
+    """
+
+    def test_rate_limit_on_issue_read_is_input_unreadable(self, af, logfile):
+        """GraphQL API rate limit on issue/comments read → input-unreadable/rate-limit.
+
+        The exact phrasing from the homelab#1069 evidence:
+        'GraphQL: API rate limit already exceeded for installation ID 142724430'
+        """
+        log = (
+            "gh issue view --json comments\n"
+            "GraphQL: API rate limit already exceeded for installation ID 142724430\n"
+        )
+        s, e = af.classify(logfile(log), {})
+        assert (s, e) == ("input-unreadable", "rate-limit")
+
+    def test_rate_limit_outranks_truncation(self, af, logfile):
+        """Rate-limit on the directive read outranks a truncation in the same log.
+
+        A run that hits both must report input-unreadable, not harness-death.
+        """
+        log = (
+            "gh issue view --json comments\n"
+            "GraphQL: API rate limit already exceeded for installation ID 142724430\n"
+            "-32602: Could not interpret tool use parameters\n"
+        )
+        s, e = af.classify(logfile(log), {})
+        assert (s, e) == ("input-unreadable", "rate-limit")
+
+    def test_rate_limit_with_pr_is_still_input_unreadable(self, af, logfile):
+        """A pre-existing PR does not mask a rate-limit death.
+
+        Like truncation and auth-storm, the rate-limit means the round could not read its
+        directive — the PR belongs to an earlier round.
+        """
+        log = (
+            "gh issue view --json comments\n"
+            "GraphQL: API rate limit already exceeded for installation ID 142724430\n"
+        )
+        s, e = af.classify(logfile(log), {"pr_url": "http://x/99"})
+        assert (s, e) == ("input-unreadable", "rate-limit")
+
+    def test_rate_limit_in_death_statuses(self, af, af_source):
+        """input-unreadable must be in DEATH_EXIT_STATUSES so bookkeeping strikes."""
+        assert "input-unreadable" in af.DEATH_EXIT_STATUSES
+
+    def test_api_rate_limit_variant(self, af, logfile):
+        """The 'API rate limit' variant (without 'already exceeded') also matches."""
+        log = (
+            "gh issue view --json title,body,comments\n"
+            "API rate limit exceeded for installation ID 142724430\n"
+        )
+        s, e = af.classify(logfile(log), {})
+        assert (s, e) == ("input-unreadable", "rate-limit")
+
+
 
