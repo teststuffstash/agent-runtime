@@ -1310,9 +1310,11 @@ def bookkeeping(stats, log_path):
             # work, plus a goal child that could never close — homelab FU-143's soak failed on
             # exactly this, and the scan now has to HOLD such issues because it cannot tell
             # merged-but-unlinked from abandoned.
-            # ⚖ `Implements`, never `Fixes`: on a `goal/**` base a closing keyword is inert, and on
-            # master it would make the PR close an issue the goal lane still owns. This line exists
-            # to satisfy the scan's regex, NOT to change what merging does.
+            # ⚖ `Fixes` on default-branch PRs, `Implements` on `goal/**` bases: on a
+            # default-branch PR, `Fixes` closes the issue on merge — intended. On a `goal/**`
+            # base, `Implements` is inert; the goal lane still owns closure and the FU-143
+            # merged-closeout does it. This line exists to satisfy the scan's regex, NOT to
+            # change what merging does.
             # ⚖ Match, do not duplicate; prepend, do not rewrite; never fatal.
             # ── CLOSING-KEYWORD LINT (#107) ──────────────────────────────────────────────────
             # Two belts, one site:
