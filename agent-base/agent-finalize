@@ -1331,11 +1331,14 @@ def bookkeeping(stats, log_path):
                     else:
                         _body = _cur.stdout
                         # ── Fix 1 (#107): rewrite closing keywords aimed at PRs ──
+                        _pr_cache = {}
                         def _rewrite_pr_closer(m):
                             num = m.group(2)
-                            r = gh("pr", "view", num, "--repo", slug,
-                                   "--json", "number", "--jq", ".number", timeout=10)
-                            if r.returncode == 0 and r.stdout.strip():
+                            if num not in _pr_cache:
+                                r = gh("pr", "view", num, "--repo", slug,
+                                       "--json", "number", "--jq", ".number", timeout=10)
+                                _pr_cache[num] = r.returncode == 0 and r.stdout.strip()
+                            if _pr_cache[num]:
                                 print("bookkeeping: closing keyword '%s #%s' targets a PR — "
                                       "rewriting to 'Refs #%s'"
                                       % (m.group(1), num, num), flush=True)
