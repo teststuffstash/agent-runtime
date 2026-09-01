@@ -323,3 +323,25 @@ class TestBookkeepingWiring:
         body_arg = edited[0][-1]
         assert body_arg.startswith("Implements #49"), (
             "Non-default-branch PR should use Implements, got: %s" % body_arg[:30])
+
+    def test_repeated_closing_keyword_dedups_gh_lookups(self, af, monkeypatch, logfile):
+        """#112: repeated `Fixes #309` in the body should issue one `gh pr view` for #309."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "p"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
+                          pr_body="Fixes #309\nSee also Fixes #309\nCloses #309\n",
+                          is_pr={"309"})
+        # Count gh pr view calls for #309 (the PR-check lookup)
+        pr_checks = [c for c in calls
+                     if c[1:3] == ("pr", "view") and "--repo" in c and "number" in c
+                     and c[3] == "309"]
+        assert len(pr_checks) == 1, (
+            "Expected 1 gh pr view for #309, got %d: %s" % (len(pr_checks), pr_checks))
+        # The body should have all three rewritten to Refs #309
+        edited = self._find(calls, "pr", "edit")
+        assert len(edited) >= 1
+        body_arg = edited[0][-1]
+        assert body_arg.count("Refs #309") == 3, (
+            "Expected 3 Refs #309 in body, got: %s" % body_arg)
+        assert "Fixes #309" not in body_arg
+        assert "Closes #309" not in body_arg
