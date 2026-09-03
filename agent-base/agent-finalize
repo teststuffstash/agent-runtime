@@ -70,10 +70,13 @@ def router_report(stats, exit_status, error_class):
     """homelab FU-095 P1: POST the run report to the egress proxy's /report (ADR-096 M5) from
     IN-POD — the launcher's finalizer twin. AGENT_REPORT_URL + AGENT_STACK are launcher-injected
     (stack resolution is launcher-owned; the pod has no homelab checkout). Best-effort: absent
-    env or unreachable proxy skips loudly, never fails the run."""
+    env or unreachable proxy skips loudly, never fails the run.
+
+    Returns the provider slug from the reply, or '' when absent/unreachable — the caller folds
+    it into AGENT_RUN_STATS (issue #115)."""
     url = os.environ.get("AGENT_REPORT_URL") or ""
     if not url:
-        return
+        return ""
     payload = {
         "session": os.environ.get("HOSTNAME") or stats.get("pod") or "",
         "task": os.environ.get("AGENT_TASK") or "",
@@ -100,10 +103,25 @@ def router_report(stats, exit_status, error_class):
     # flag — a subscription run has no key and no dollars, and is unknown in neither sense.
     if stats.get("cost_unknown"):
         payload["cost_unknown"] = True
+    # Issue #115: authenticate with the session key ref so the proxy can resolve the provider.
+    # Send the header only when the value starts with `ref:` — a subscription ride has no key,
+    # and a real key must not leak into this header (homelab platform facts, 2026-09-03).
+    headers = {"Content-Type": "application/json"}
+    key = os.environ.get("OPENROUTER_API_KEY") or ""
+    if key.startswith("ref:"):
+        headers["Authorization"] = "Bearer " + key
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=5) as r:
-        print("router-report: posted (%s) -> %s" % (url, r.status), flush=True)
+                                 headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = json.loads(r.read().decode())
+            provider = body.get("provider", "")
+            print("router-report: posted (%s) -> %s (provider=%s)" % (url, r.status, provider or "''"),
+                  flush=True)
+            return provider
+    except Exception as e:
+        print("router-report: %s" % e, file=sys.stderr)
+        return ""
 
 
 def cost_fields(usage_start, usage_end):
@@ -900,6 +918,7 @@ def run_stats_table(stats, task):
     check-run's output summary. Unchanged bytes (transcripts pointer + cost line included); only
     the channel moved, and the ledger/S3 copy is untouched either way."""
     rail_row = "| rail | `%s` |\n" % stats["rail"] if "rail" in stats else ""
+    provider_row = "| provider | `%s` |\n" % stats["provider"] if "provider" in stats else ""
     return (
         "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
         "| metric | value |\n|---|---|\n"
@@ -910,6 +929,7 @@ def run_stats_table(stats, task):
         "| exit / error_class | `%s` / `%s` |\n"
         "| node / pod | `%s` / `%s` |\n"
         "%s"
+        "%s"
         "\n\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
     ) % (
         stats.get("model", "?"), stats.get("harness", "?"), _cost_cell(stats),
@@ -917,6 +937,7 @@ def run_stats_table(stats, task):
         stats.get("exit_status", "?"), stats.get("error_class", "") or "clean",
         stats.get("node", "?"), stats.get("pod", "?"),
         rail_row,
+        provider_row,
         stats.get("project", "?"), task or "adhoc",
     )
 
@@ -1865,14 +1886,18 @@ def finalize(log_path):
         bookkeeping(stats, log_path)
     except Exception as e:
         print("bookkeeping: non-fatal error: %s" % e, file=sys.stderr)
-    print("AGENT_RUN_STATS " + json.dumps(stats, separators=(",", ":")), flush=True)
-    try:  # homelab FU-095 P1: the launcher's POST /report twin — coordinator-path rides have no
-        # attending launcher, so without this their outcomes never reach the router's shadow
-        # store. Idempotent per session server-side (INSERT OR REPLACE) — a double post from a
-        # launcher-attended run is harmless by design.
-        router_report(stats, exit_status, error_class)
+    # Issue #115: POST /report BEFORE the stats line so the replied provider can be folded in.
+    # Best-effort: unreachable proxy returns '' and never fails the run.
+    provider = ""
+    try:
+        provider = router_report(stats, exit_status, error_class) or ""
     except Exception as e:
         print("router-report: non-fatal error: %s" % e, file=sys.stderr)
+    # Fold the provider into AGENT_RUN_STATS the way rail was folded (agent-runtime#81).
+    # Never write ""-as-fact (agent-runtime#12 never-fabricate rule).
+    if provider:
+        stats["provider"] = provider
+    print("AGENT_RUN_STATS " + json.dumps(stats, separators=(",", ":")), flush=True)
     try:  # FU-057 §B1: worker $ + outcome → Prometheus (goose has no OTLP rail)
         push_metrics(stats, exit_status, error_class)
     except Exception as e:

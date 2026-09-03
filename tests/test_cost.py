@@ -42,12 +42,16 @@ class _Resp:
     """Minimal urlopen return: a context manager with a status, as router_report reads it."""
 
     status = 200
+    _body = b'{"stored": true, "strike": false}'
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+    def read(self):
+        return self._body
 
 
 class TestOrUsage:
@@ -341,7 +345,7 @@ class TestRouterReportProvider:
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("AGENT_REPORT_URL", "http://router.invalid/report")
 
-    def _post_with_reply(self, af, fake_urlopen, reply_body, stats,
+    def _post_with_reply(self, af, monkeypatch, reply_body, stats,
                          exit_status="clean", error_class=""):
         """Post and return the provider that router_report() returns."""
         box = {}
@@ -372,7 +376,7 @@ class TestRouterReportProvider:
         """When the reply carries a provider slug, router_report() returns it."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
         provider, box = self._post_with_reply(
-            af, fake_urlopen,
+            af, monkeypatch,
             {"stored": True, "strike": False, "provider": "openai/gpt-4"},
             {"cost_usd": 0.0902, "pr_url": "http://x/1"})
         assert provider == "openai/gpt-4"
@@ -381,7 +385,7 @@ class TestRouterReportProvider:
         """When the reply omits provider (subscription ride, or no provider event yet), return ''."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
         provider, box = self._post_with_reply(
-            af, fake_urlopen,
+            af, monkeypatch,
             {"stored": True, "strike": False},
             {"cost_usd": 0.0902, "pr_url": "http://x/1"})
         assert provider == ""
@@ -390,7 +394,7 @@ class TestRouterReportProvider:
         """When the reply has provider: '', return '' — never fabricate a value."""
         monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
         provider, box = self._post_with_reply(
-            af, fake_urlopen,
+            af, monkeypatch,
             {"stored": True, "strike": False, "provider": ""},
             {"cost_usd": 0.0902, "pr_url": "http://x/1"})
         assert provider == ""
