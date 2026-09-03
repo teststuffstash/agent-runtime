@@ -262,3 +262,166 @@ class TestRouterReportRail:
         payload = self._post(af, fake_urlopen, {"cost_unknown": True}, "budget-403", "budget-exhausted")
         assert isinstance(payload["rail"], str)
         json.dumps(payload)
+
+
+class TestRouterReportSessionRef:
+    """Issue #115: router_report() must authenticate with the session key ref so the proxy can
+    resolve the provider, and fold the replied provider into AGENT_RUN_STATS.
+
+    The proxy resolves the served provider from an `Authorization: Bearer ref:` header. Without
+    it, session_ref is always "" and provider attribution is empty. A subscription ride (claude/*)
+    has no OpenRouter key ref and must post exactly as today — no header, no provider key.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _explicit_env(self, monkeypatch):
+        """Same pinning as the cost class — ambient env must not steer these tests."""
+        for var in ("AGENT_ROUND", "AGENT_STACK", "AGENT_TASK", "MODEL", "GOOSE_MODEL", "HOSTNAME",
+                    "OPENROUTER_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AGENT_REPORT_URL", "http://router.invalid/report")
+
+    def _post(self, af, fake_urlopen, stats, exit_status="clean", error_class=""):
+        """Post and return (payload_dict, request_object) so tests can inspect headers too."""
+        box = {}
+
+        def _capture(req):
+            box["url"] = req.full_url
+            box["data"] = req.data
+            box["headers"] = {k: v for k, v in req.headers.items()}
+            return _Resp()
+
+        fake_urlopen(_capture)
+        af.router_report(stats, exit_status, error_class)
+        return json.loads(box["data"].decode()), box
+
+    def test_sends_session_ref_when_key_starts_with_ref(self, af, fake_urlopen, monkeypatch):
+        """When OPENROUTER_API_KEY is a ref: value, the Authorization header must carry it."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ref:my-ns/my-secret")
+        payload, box = self._post(af, fake_urlopen, {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        auth = box["headers"].get("Authorization", "")
+        assert auth == "Bearer ref:my-ns/my-secret", \
+            "Expected Authorization header with ref, got %r" % auth
+
+    def test_omits_auth_header_when_key_is_real_key(self, af, fake_urlopen, monkeypatch):
+        """A real OpenRouter key (not a ref) must NOT be sent as Authorization on /report."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-abc123")
+        payload, box = self._post(af, fake_urlopen, {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        auth = box["headers"].get("Authorization", "")
+        assert auth == "", \
+            "Real key must not leak into /report header, got %r" % auth
+
+    def test_omits_auth_header_when_key_is_unset(self, af, fake_urlopen):
+        """A subscription ride has no OPENROUTER_API_KEY — must post exactly as today."""
+        payload, box = self._post(af, fake_urlopen, {"subscription": True, "turns": 42})
+        auth = box["headers"].get("Authorization", "")
+        assert auth == "", \
+            "Subscription ride must not send auth header, got %r" % auth
+
+    def test_omits_auth_header_when_key_does_not_start_with_ref(self, af, fake_urlopen, monkeypatch):
+        """AGENT_CRED_INJECT=0 means the pod holds the real key, not a ref — no header."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-live-real-key")
+        payload, box = self._post(af, fake_urlopen, {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        auth = box["headers"].get("Authorization", "")
+        assert auth == "", \
+            "Non-ref key must not be sent as auth header, got %r" % auth
+
+
+class TestRouterReportProvider:
+    """Issue #115: fold the provider the /report reply returns into AGENT_RUN_STATS.
+
+    The proxy now returns `{"stored": true, "strike": false, "provider": "<slug>"}`.
+    router_report() must return the provider so finalize() can fold it into stats.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _explicit_env(self, monkeypatch):
+        for var in ("AGENT_ROUND", "AGENT_STACK", "AGENT_TASK", "MODEL", "GOOSE_MODEL", "HOSTNAME",
+                    "OPENROUTER_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AGENT_REPORT_URL", "http://router.invalid/report")
+
+    def _post_with_reply(self, af, fake_urlopen, reply_body, stats,
+                         exit_status="clean", error_class=""):
+        """Post and return the provider that router_report() returns."""
+        box = {}
+
+        class _ReplyingResp:
+            status = 200
+            body = json.dumps(reply_body).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self.body
+
+        def _fake(req, timeout=None):
+            box["url"] = req.full_url
+            box["data"] = req.data
+            return _ReplyingResp()
+
+        monkeypatch.setattr(af.urllib.request, "urlopen", _fake)
+        provider = af.router_report(stats, exit_status, error_class)
+        return provider, box
+
+    def test_returns_provider_from_reply(self, af, fake_urlopen, monkeypatch):
+        """When the reply carries a provider slug, router_report() returns it."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
+        provider, box = self._post_with_reply(
+            af, fake_urlopen,
+            {"stored": True, "strike": False, "provider": "openai/gpt-4"},
+            {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        assert provider == "openai/gpt-4"
+
+    def test_returns_empty_string_when_reply_has_no_provider(self, af, fake_urlopen, monkeypatch):
+        """When the reply omits provider (subscription ride, or no provider event yet), return ''."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
+        provider, box = self._post_with_reply(
+            af, fake_urlopen,
+            {"stored": True, "strike": False},
+            {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        assert provider == ""
+
+    def test_returns_empty_string_when_reply_provider_is_empty(self, af, fake_urlopen, monkeypatch):
+        """When the reply has provider: '', return '' — never fabricate a value."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
+        provider, box = self._post_with_reply(
+            af, fake_urlopen,
+            {"stored": True, "strike": False, "provider": ""},
+            {"cost_usd": 0.0902, "pr_url": "http://x/1"})
+        assert provider == ""
+
+    def test_returns_empty_string_when_urlopen_fails(self, af, fake_urlopen, monkeypatch):
+        """Best-effort: an unreachable proxy returns '' and never fails the run."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "ref:ns/secret")
+
+        def _boom(req, timeout=None):
+            raise OSError("Connection refused")
+
+        monkeypatch.setattr(af.urllib.request, "urlopen", _boom)
+        provider = af.router_report({"cost_usd": 0.0902, "pr_url": "http://x/1"}, "clean", "")
+        assert provider == ""
+
+
+class TestRunStatsTableProvider:
+    """Issue #115: the run-log table renders provider the way it renders rail."""
+
+    def test_provider_row_appears_when_provider_in_stats(self, af):
+        table = af.run_stats_table({"provider": "openai/gpt-4", "model": "gpt-4",
+                                    "harness": "goose", "cost_usd": 0.09, "duration_s": 42,
+                                    "ci_passed": True, "exit_status": "clean",
+                                    "error_class": "", "node": "n1", "pod": "p1",
+                                    "project": "test"}, "test-task")
+        assert "| provider | `openai/gpt-4` |" in table
+
+    def test_provider_row_omitted_when_provider_not_in_stats(self, af):
+        """Never render a provider row with an empty value — same rule as rail."""
+        table = af.run_stats_table({"model": "gpt-4", "harness": "goose", "cost_usd": 0.09,
+                                    "duration_s": 42, "ci_passed": True, "exit_status": "clean",
+                                    "error_class": "", "node": "n1", "pod": "p1",
+                                    "project": "test"}, "test-task")
+        assert "| provider |" not in table
