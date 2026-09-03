@@ -429,3 +429,85 @@ class TestRunStatsTableProvider:
                                     "error_class": "", "node": "n1", "pod": "p1",
                                     "project": "test"}, "test-task")
         assert "| provider |" not in table
+
+
+class TestFinalizeProviderOrdering:
+    """Issue #115, round 2: router_report() must fold provider BEFORE bookkeeping() renders the
+    run-stats table, not merely before the AGENT_RUN_STATS line.
+
+    bookkeeping() internally calls emit_run_stats() -> run_stats_table(), which builds and POSTs
+    the run-stats table at that moment. If router_report() runs after bookkeeping(), the provider
+    reaches only the JSON line, never the rendered table — the third acceptance clause ("the
+    run-log table renders it the way rail does") is unmet.
+
+    This test drives finalize() with stubs and asserts that bookkeeping() observes stats with
+    "provider" already present. It is RED on the broken ordering (router_report after bookkeeping)
+    and GREEN once the ordering is corrected.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _explicit_env(self, monkeypatch):
+        """Pin env vars that finalize() reads so ambient values can't steer the test."""
+        for var in ("PROJECT", "HOSTNAME", "NODE_NAME", "HARNESS", "GOOSE_MODEL", "MODEL",
+                    "OPENROUTER_KEY_HASH", "AGENT_RAIL", "AGENT_DISPATCH_EPOCH",
+                    "OPENROUTER_API_KEY", "AGENT_REPORT_URL", "WORK_BRANCH", "AGENT_TASK",
+                    "HARNESS_EXIT", "STORM_MARKER", "AGENT_WATCHDOG_MARKER",
+                    "AGENT_PHASE_MARKS", "START_EPOCH", "USAGE_START"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HOSTNAME", "test-pod")
+        monkeypatch.setenv("AGENT_REPORT_URL", "http://router.invalid/report")
+        monkeypatch.setenv("AGENT_WATCHDOG_MARKER", "/tmp/no-such-marker")
+
+    def test_provider_folded_before_bookkeeping_observes_stats(self, af, monkeypatch, tmp_path):
+        """router_report() must fold provider into stats BEFORE bookkeeping() reads them.
+
+        Stub router_report to return a known provider slug; spy on bookkeeping to capture the
+        stats dict it receives. Assert that "provider" is present in the captured dict.
+        """
+        # Spy on bookkeeping: capture the stats dict it receives
+        bookkeeping_captured = {}
+
+        def _bookkeeping_spy(stats, log_path):
+            bookkeeping_captured.update(stats)
+            # Don't actually do bookkeeping — no gh, no git in tests
+
+        monkeypatch.setattr(af, "bookkeeping", _bookkeeping_spy)
+
+        # Stub router_report to return a known provider
+        def _stub_router_report(stats, exit_status, error_class):
+            return "openai/gpt-4"
+
+        monkeypatch.setattr(af, "router_report", _stub_router_report)
+
+        # Stub all the other heavy functions that finalize() calls
+        monkeypatch.setattr(af, "salvage_push", lambda stats, log_path: None)
+        monkeypatch.setattr(af, "derive_pr_url", lambda stats: None)
+        monkeypatch.setattr(af, "push_metrics", lambda stats, exit_status, error_class: None)
+        monkeypatch.setattr(af, "push_phase_metrics", lambda durations, stats: None)
+        monkeypatch.setattr(af, "upload_transcripts", lambda stats, log_path: None)
+        monkeypatch.setattr(af, "parse_outcome", lambda log_path: {})
+        monkeypatch.setattr(af, "claude_usage", lambda: {})
+        monkeypatch.setattr(af, "claude_cost_equiv", lambda log_path: None)
+        monkeypatch.setattr(af, "or_usage", lambda: None)
+        monkeypatch.setattr(af, "cost_fields", lambda start, end: {"cost_usd": 0.09})
+        monkeypatch.setattr(af, "_read_float", lambda path: None)
+
+        # Stub classify to return clean exit
+        def _stub_classify(log_path, stats):
+            return "clean", ""
+
+        monkeypatch.setattr(af, "classify", _stub_classify)
+
+        # Create a dummy log file
+        log_path = str(tmp_path / "run.log")
+        with open(log_path, "w") as f:
+            f.write("test run log\n")
+
+        # Run finalize — this is the function under test
+        af.finalize(log_path)
+
+        # Assert: bookkeeping must have observed "provider" in stats
+        assert "provider" in bookkeeping_captured, \
+            "bookkeeping() must observe provider in stats; got keys: %r" % list(bookkeeping_captured.keys())
+        assert bookkeeping_captured["provider"] == "openai/gpt-4", \
+            "provider value must match what router_report returned"
