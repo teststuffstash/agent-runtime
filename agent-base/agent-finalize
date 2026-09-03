@@ -1880,23 +1880,23 @@ def finalize(log_path):
     exit_status, error_class = classify(log_path, stats)
     stats["exit_status"] = exit_status
     stats["error_class"] = error_class
+    # Issue #115: POST /report BEFORE bookkeeping(), not merely before the stats line —
+    # bookkeeping() renders and POSTs the run-stats table (emit_run_stats -> run_stats_table),
+    # so a provider folded after it never reaches the rendered table, only the JSON line.
+    # This mirrors `rail`, which is folded before bookkeeping() for the same reason.
+    provider = ""
+    try:
+        provider = router_report(stats, exit_status, error_class) or ""
+    except Exception as e:
+        print("router-report: non-fatal error: %s" % e, file=sys.stderr)
+    if provider:
+        stats["provider"] = provider
     # FU-064/FU-043: in-pod GitHub bookkeeping BEFORE the stats line, so the *_by_pod flags it sets
     # ride the line and the launcher fallback knows what to skip.
     try:
         bookkeeping(stats, log_path)
     except Exception as e:
         print("bookkeeping: non-fatal error: %s" % e, file=sys.stderr)
-    # Issue #115: POST /report BEFORE the stats line so the replied provider can be folded in.
-    # Best-effort: unreachable proxy returns '' and never fails the run.
-    provider = ""
-    try:
-        provider = router_report(stats, exit_status, error_class) or ""
-    except Exception as e:
-        print("router-report: non-fatal error: %s" % e, file=sys.stderr)
-    # Fold the provider into AGENT_RUN_STATS the way rail was folded (agent-runtime#81).
-    # Never write ""-as-fact (agent-runtime#12 never-fabricate rule).
-    if provider:
-        stats["provider"] = provider
     print("AGENT_RUN_STATS " + json.dumps(stats, separators=(",", ":")), flush=True)
     try:  # FU-057 §B1: worker $ + outcome → Prometheus (goose has no OTLP rail)
         push_metrics(stats, exit_status, error_class)
