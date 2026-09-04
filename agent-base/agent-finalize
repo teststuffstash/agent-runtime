@@ -287,6 +287,46 @@ def _carry_budget_match(text, stats):
         stats["budget_match"] = m.group(0).strip()
 
 
+def _check_stale_evidence(stats):
+    """Check that evidence timestamps in the recipe's output postdate the head commit.
+
+    When the recipe's final_output (lifted into stats by parse_outcome) contains ISO 8601
+    timestamps, assert that max(evidence ts) > head commit ts. On violation, set
+    stats["stale_evidence"] so the stats table flags it loudly. Never fatal: a git failure
+    or absent timestamps is silently skipped (agent-runtime#116).
+
+    The head commit timestamp is read from `git log -1 --format=%cI`, which emits ISO 8601
+    with a timezone offset (e.g. "2026-09-02T20:42:41Z"). Evidence timestamps are matched
+    by the same ISO 8601 pattern and compared as strings: ISO 8601 sorts lexicographically
+    when the timezone is Z or +00:00, which is the common case for CI/agent evidence.
+    """
+    iso_pat = re.compile(r'\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}))\b')
+    timestamps = []
+    for v in stats.values():
+        if isinstance(v, str):
+            timestamps.extend(iso_pat.findall(v))
+    if not timestamps:
+        return  # No evidence timestamps to check — nothing to assert
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cI"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return  # Can't get head commit timestamp — skip the check
+        head_ts = result.stdout.strip()
+    except Exception:
+        return  # Non-fatal: git failure must never crash finalize
+    max_evidence_ts = max(timestamps)
+    # ISO 8601 strings sort lexicographically when the timezone is consistent (Z or +00:00).
+    # This is the common case for CI/agent evidence timestamps.
+    if max_evidence_ts <= head_ts:
+        stats["stale_evidence"] = True
+        print("stale-evidence: max evidence timestamp %s ≤ head commit %s — "
+              "evidence was gathered before the latest code change"
+              % (max_evidence_ts, head_ts), flush=True)
+
+
 def failure_signature(text, ci_passed=None, watchdog=""):
     """The dominant machine-detectable failure in a run log → (exit_status, error_class), or None.
 
@@ -919,6 +959,9 @@ def run_stats_table(stats, task):
     the channel moved, and the ledger/S3 copy is untouched either way."""
     rail_row = "| rail | `%s` |\n" % stats["rail"] if "rail" in stats else ""
     provider_row = "| provider | `%s` |\n" % stats["provider"] if "provider" in stats else ""
+    stale_row = ""
+    if stats.get("stale_evidence"):
+        stale_row = "| \u26a0 stale evidence | `yes` |\n"
     return (
         "\U0001f916 **Agent run stats** (posted in-pod)\n\n"
         "| metric | value |\n|---|---|\n"
@@ -930,6 +973,7 @@ def run_stats_table(stats, task):
         "| node / pod | `%s` / `%s` |\n"
         "%s"
         "%s"
+        "%s"
         "\n\U0001f5c2 transcripts: `s3://agent-transcripts/%s/%s/`"
     ) % (
         stats.get("model", "?"), stats.get("harness", "?"), _cost_cell(stats),
@@ -938,6 +982,7 @@ def run_stats_table(stats, task):
         stats.get("node", "?"), stats.get("pod", "?"),
         rail_row,
         provider_row,
+        stale_row,
         stats.get("project", "?"), task or "adhoc",
     )
 
@@ -1866,6 +1911,10 @@ def finalize(log_path):
         # Cost = usage delta, but ONLY when both ends read — see cost_fields (agent-runtime#12).
         stats.update(cost_fields(_read_float(USAGE_START), or_usage()))
     stats.update(parse_outcome(log_path) if log_path else {})
+    # Issue #116: stale-evidence check — when the recipe's final_output cites evidence with
+    # parseable timestamps, assert max(evidence ts) > head commit ts. On violation, flag it
+    # in stats so the run-stats table shows a loud warning row. Never silently pass.
+    _check_stale_evidence(stats)
     # FU-064a: harness-owned terminal push BEFORE classification/bookkeeping, so the salvaged branch
     # rides the stats line and the strike comment. Also before derive_pr_url: a resumed branch can
     # carry an OLDER still-open PR, and a derived pr_url must never suppress the salvage of THIS
