@@ -139,6 +139,21 @@ class TestCheckStaleEvidence:
         # Must flag as stale (19:30Z < 20:42:41Z)
         assert stats.get("stale_evidence") is True
 
+    def test_mixed_offset_timestamps_negative_offset_fresh(self, af, monkeypatch):
+        """Timestamps with -05:00 offset sort below Z lexicographically but are actually later.
+
+        2026-09-02T18:00:00-05:00 = 23:00Z (genuinely fresh)
+        head commit 2026-09-02T20:42:41Z
+
+        Lexicographic comparison would report this as stale (false positive),
+        but proper datetime comparison must NOT flag it as stale.
+        """
+        stats = {"root_cause": "tested at 2026-09-02T18:00:00-05:00"}
+        self._fake_git(af, monkeypatch, "2026-09-02T20:42:41Z")
+        af._check_stale_evidence(stats)
+        # Must NOT flag as stale (23:00Z > 20:42:41Z)
+        assert "stale_evidence" not in stats
+
 
 class TestStaleEvidenceInStatsTable:
     """run_stats_table() must include a stale_evidence warning row when the flag is set."""
