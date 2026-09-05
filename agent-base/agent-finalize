@@ -1519,6 +1519,8 @@ def bookkeeping(stats, log_path):
                 os.environ.get("MODEL") or stats.get("model", "?"), err,
                 os.environ.get("AGENT_ROUND", "1"), stats.get("pod", "?"),
             )
+            if stats.get("provider"):
+                strike += " provider=%s" % stats["provider"]
             # Issue-scoped, not round-scoped (#33): the coordinator reads this to decide whether to
             # re-dispatch with --work-branch, so a resumed round that committed nothing must still
             # name the branch it resumed.
