@@ -26,6 +26,7 @@ from every stack. Corollary: a python-version bug that "breaks in one project bu
 only be in project code (its own `devbox run` python), never in this file.
 """
 import json, os, re, shutil, subprocess, sys, time, urllib.parse, urllib.request
+from datetime import datetime
 
 START_EPOCH = "/tmp/agent-start-epoch"
 USAGE_START = "/tmp/agent-usage-start"
@@ -301,7 +302,6 @@ def _check_stale_evidence(stats):
     normalizing Z to +00:00. Comparisons are performed on parsed datetime objects, not strings,
     to correctly handle non-zero UTC offsets.
     """
-    from datetime import datetime
     iso_pat = re.compile(r'\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}))\b')
     timestamps = []
     for v in stats.values():
