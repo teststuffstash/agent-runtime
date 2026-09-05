@@ -24,7 +24,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The carved-out dep-bump lane's replacement owner (CODEOWNERS un-owns
       # agent-base/devbox.{json,lock}; this asserts such a PR is a pure version/hash diff).
       # gh comes baked in the ARC runner image (homelab docker/arc-runner/).
@@ -35,9 +35,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GUARD_SET: agent-base/devbox.json agent-base/devbox.lock
         run: sh scripts/deps-pin-guard.sh
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Build agent-base image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: agent-base/Dockerfile
@@ -52,8 +52,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: jetify-com/devbox-install-action@v0.13.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: jetify-com/devbox-install-action@22b0f5500b14df4ea357ce673fbd4ced940ed6a1 # v0.13.0
         with:
           enable-cache: "true"
       - name: devbox run ci
