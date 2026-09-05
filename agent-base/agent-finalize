@@ -297,9 +297,11 @@ def _check_stale_evidence(stats):
 
     The head commit timestamp is read from `git log -1 --format=%cI`, which emits ISO 8601
     with a timezone offset (e.g. "2026-09-02T20:42:41Z"). Evidence timestamps are matched
-    by the same ISO 8601 pattern and compared as strings: ISO 8601 sorts lexicographically
-    when the timezone is Z or +00:00, which is the common case for CI/agent evidence.
+    by the same ISO 8601 pattern and parsed as aware datetimes using fromisoformat,
+    normalizing Z to +00:00. Comparisons are performed on parsed datetime objects, not strings,
+    to correctly handle non-zero UTC offsets.
     """
+    from datetime import datetime
     iso_pat = re.compile(r'\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2}))\b')
     timestamps = []
     for v in stats.values():
@@ -315,17 +317,28 @@ def _check_stale_evidence(stats):
         )
         if result.returncode != 0 or not result.stdout.strip():
             return  # Can't get head commit timestamp — skip the check
-        head_ts = result.stdout.strip()
+        head_ts_str = result.stdout.strip()
     except Exception:
         return  # Non-fatal: git failure must never crash finalize
-    max_evidence_ts = max(timestamps)
-    # ISO 8601 strings sort lexicographically when the timezone is consistent (Z or +00:00).
-    # This is the common case for CI/agent evidence timestamps.
-    if max_evidence_ts <= head_ts:
+    try:
+        head_dt = datetime.fromisoformat(head_ts_str.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return  # Unparseable head timestamp — skip the check
+    max_evidence_dt = None
+    for ts_str in timestamps:
+        try:
+            dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+            if max_evidence_dt is None or dt > max_evidence_dt:
+                max_evidence_dt = dt
+        except (ValueError, AttributeError):
+            continue  # Unparseable timestamp — skip this one
+    if max_evidence_dt is None:
+        return  # All timestamps unparseable — nothing to assert
+    if max_evidence_dt <= head_dt:
         stats["stale_evidence"] = True
         print("stale-evidence: max evidence timestamp %s ≤ head commit %s — "
               "evidence was gathered before the latest code change"
-              % (max_evidence_ts, head_ts), flush=True)
+              % (max_evidence_dt.isoformat(), head_dt.isoformat()), flush=True)
 
 
 def failure_signature(text, ci_passed=None, watchdog=""):
