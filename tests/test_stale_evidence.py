@@ -14,12 +14,12 @@ class TestCheckStaleEvidence:
     """_check_stale_evidence() — the pure-ish predicate over stats + git."""
 
     def _fake_git(self, af, monkeypatch, head_ts):
-        """Monkeypatch subprocess.run so `git log -1 --format=%cI` returns head_ts."""
+        """Monkeypatch subprocess.run so `git -C <wd> log -1 --format=%cI` returns head_ts."""
         calls = []
 
         def _fake_run(argv, **kw):
             calls.append(tuple(argv))
-            if argv[:2] == ["git", "log"] and "--format=%cI" in argv:
+            if argv[0] == "git" and "--format=%cI" in argv:
                 return af.subprocess.CompletedProcess(argv, 0, head_ts + "\n", "")
             return af.subprocess.CompletedProcess(argv, 0, "", "")
 
