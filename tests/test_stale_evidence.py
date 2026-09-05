@@ -102,6 +102,28 @@ class TestCheckStaleEvidence:
         af._check_stale_evidence(stats)
         assert stats.get("stale_evidence") is True
 
+    def test_git_call_scoped_to_workdir(self, af, monkeypatch):
+        """The git call must use -C <WORKDIR> so it works when cwd is not the repo."""
+        calls = []
+
+        def _fake_run(argv, **kw):
+            calls.append(tuple(argv))
+            if argv[0] == "git" and "--format=%cI" in argv:
+                return af.subprocess.CompletedProcess(argv, 0, "2026-09-02T20:42:41Z\n", "")
+            return af.subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(af.subprocess, "run", _fake_run)
+        monkeypatch.setenv("WORKDIR", "/some/other/repo")
+        stats = {"root_cause": "tested at 2026-09-02T21:00:00Z"}
+        af._check_stale_evidence(stats)
+        # The git call must include -C /some/other/repo
+        git_calls = [c for c in calls if c[0] == "git" and "--format=%cI" in c]
+        assert len(git_calls) == 1
+        assert "-C" in git_calls[0]
+        assert "/some/other/repo" in git_calls[0]
+        # The check should still fire (evidence > head)
+        assert "stale_evidence" not in stats
+
 
 class TestStaleEvidenceInStatsTable:
     """run_stats_table() must include a stale_evidence warning row when the flag is set."""
