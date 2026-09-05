@@ -218,6 +218,30 @@ class TestBookkeepingWiring:
             "AGENT_STRIKE: model=some/model error_class=goose-32602-truncation "
             "round=3 session=pod-7")
 
+    def test_strike_line_includes_provider_when_set(self, af, monkeypatch, logfile):
+        """#127 — when stats['provider'] is populated (from router_report), the strike line
+        appends provider=<p> at the end."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "pod-5", "provider": "openrouter/rail"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
+        body = self._find(calls, "issue", "comment")[0][-1]
+        strike_line = body.splitlines()[0]
+        assert strike_line == (
+            "AGENT_STRIKE: model=some/model error_class=goose-panic "
+            "round=3 session=pod-5 provider=openrouter/rail")
+
+    def test_strike_line_omits_provider_when_empty(self, af, monkeypatch, logfile):
+        """#127 — when stats['provider'] is absent or empty (subscription ride), the strike line
+        is unchanged — no provider field appended."""
+        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+                 "error_class": "goose-panic", "pod": "pod-5"}
+        calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
+        body = self._find(calls, "issue", "comment")[0][-1]
+        strike_line = body.splitlines()[0]
+        assert strike_line == (
+            "AGENT_STRIKE: model=some/model error_class=goose-panic "
+            "round=3 session=pod-5")
+
     def test_a_died_round_still_guarantees_the_issue_link(self, af, monkeypatch, logfile):
         """#32 holds on both legs: the artifact is real either way, and an unlinked PR gets the
         issue re-dispatched onto finished work."""
