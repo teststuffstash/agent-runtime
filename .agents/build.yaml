@@ -1,5 +1,5 @@
 # Goose recipe — the agent-runtime BUILD-task agent (agent-runtime#128; FU-114 L2/L3 — the
-# task-class sibling of fix.yaml, donors: homelab + openrouter-operator .agents/build.yaml).
+# task-class sibling of fix.yaml, donors: homelab .agents/build.yaml × this repo's fix.yaml).
 #
 #   goose run --recipe .agents/build.yaml --params issue=<n>
 #
