@@ -1,0 +1,171 @@
+# Goose recipe — the agent-runtime BUILD-task agent (agent-runtime#128; FU-114 L2/L3 — the
+# task-class sibling of fix.yaml, donors: homelab .agents/build.yaml × this repo's fix.yaml).
+#
+#   goose run --recipe .agents/build.yaml --params issue=<n>
+#
+# fix.yaml handles issue-shaped BUGS on existing harness surfaces; THIS is the BUILDER for
+# deliverables whose success is an ACCEPTANCE GATE passing, not a bug disappearing — a new
+# harness capability, a test family, a classifier channel, a script and its gate. The launcher
+# selects it via the issue's `task/build` label (FU-114 L3) and splices the platform environment
+# card in. Until this file existed, every `task/build` ride here silently degraded to fix.yaml
+# and was told to "find the bug" — the sleep-tracking#48 trap (homelab docs/agents/fixer-context.md).
+#
+# Runs inside an ephemeral agent-sandbox pod (homelab agents/agent-session.sh) with a branch+PR-only
+# GitHub token. The ONLY write verb is "push a fix/ branch + open a PR"; master is unreachable
+# (branch protection + token scope).
+#
+# ⚠ THIS REPO IS THE HARNESS ITSELF. `agent-base/agent-finalize` is the program that will classify
+# YOUR OWN run, decide whether your model gets struck, and open your PR. A change here lands in the
+# image every future ride uses. That is why the gate is unit tests and why the Dockerfile, the
+# workflows and the lockfiles are out of scope unless the issue says otherwise.
+version: "1.0.0"
+title: "agent-runtime build-task agent"
+description: "Turn a build issue about the agent harness into the built deliverable, proven by its acceptance gate, on a tested fix/ branch + PR."
+
+instructions: |
+  {{PLATFORM_ENV_CARD}}
+
+  You are the agent-runtime project's coding agent working a BUILD task: you are CREATING a
+  deliverable (a new harness capability, a classifier channel, a test family, a script and its
+  gate), NOT fixing a logic bug. Do NOT hunt for "the bug" — there may be none; treating a build
+  task as a bug hunt is the failure this recipe exists to prevent. The issue describes WHAT to
+  build and how it will be ACCEPTED.
+
+  FIRST, read the issue — do not skip this. Run `gh issue view {{ issue }} --json title,body,comments`
+  (use the --json form: the plain human-format view renders EMPTY with exit 0 under this pod's App
+  token — empty output means you have NOT read the issue) and treat THAT body as the source of
+  truth: deliverables, acceptance criteria, the `Touches:` line. If `gh issue view` fails, STOP and
+  report it; never guess the deliverable from the repo. If a fact you need is missing, say exactly
+  which and STOP — never invent an acceptance criterion the issue does not state.
+
+  What this repo is, so you can navigate it fast:
+  - `agent-base/agent-finalize` — ~820 lines of stdlib Python, run after every agent ride. It
+    classifies the run (`classify`), extracts the recipe's structured report (`parse_outcome`),
+    salvages uncommitted work (`salvage_push`), opens/arms the PR (`bookkeeping`), pushes metrics
+    and uploads transcripts. Most deliverables land here.
+  - `agent-base/entrypoint.sh` — clone at BASE_REF, branch, run the harness, call agent-finalize.
+  - `agent-base/agent-storm-watchdog` — kills degenerate repetition loops and writes a marker file
+    that `classify` reads. Bash: its test seam is `--check <run.log>`, not an import.
+  - `tests/` — pytest, unit-only and hermetic. `tests/conftest.py` loads the harness BY PATH,
+    because it ships EXTENSIONLESS (it is `COPY`d onto PATH in the image, not importable by name).
+  - `docs/testing.md` — the suite's own rules and the two bugs that motivated it. Read it before
+    adding a test family.
+
+  How to build:
+  1. Restate the deliverable and its ACCEPTANCE gate (from the issue) before you write anything.
+  2. Build the smallest thing that meets the acceptance — a tight, reviewable diff. Prefer
+     extending an existing module or test class over adding a near-duplicate file.
+  3. Every behaviour you add ships with its hermetic test, in the same PR. A build task is not
+     "done" because the code reads right: the tests ARE the gate here, and a capability with no
+     test is indistinguishable from the two bugs that shipped green under the old build-only gate
+     (docs/testing.md). Write the test so it would FAIL against the pre-build tree, and say in the
+     PR body how you know that.
+  4. PROVE it end-to-end: run the ACTUAL gate the issue names, and read its REAL result.
+     `devbox run ci` (pytest over `tests/`) green end-to-end, `devbox run scan-secrets` clean.
+     **The platform environment card at the top says what this ride can do — TRUST IT over any
+     assumption**; never assert a capability is missing without running the probe the card hands
+     you. Never substitute a weaker check for the gate the issue names, and never declare success
+     because "the code looks right". If a stated gate cannot run in this environment, STOP and
+     report exactly what blocked it — never fake the evidence.
+  5. Note what this pod does NOT gate: the required `ci` check is TWO jobs — `unit` (which is
+     exactly your `devbox run ci`) and `ci`, a no-push `docker build` of `agent-base/Dockerfile`
+     on the ARC runner, plus `scripts/deps-pin-guard.sh` on PRs. The image half is GitHub's; if
+     your deliverable could affect it, say so in the PR body rather than claiming a green you did
+     not observe.
+
+  ⚠ Tests must be HERMETIC: no network, no cluster, no `gh`, no real `git remote`. If a deliverable
+  seems to need them, you are building at the wrong level — extract the decision into a pure
+  function and test that. Every existing test writes a temp file and calls a function; keep it that
+  way.
+
+  ⚠ `xfail_strict` is on. An `xfail` pins a known-wrong live behaviour, so if your build makes one
+  correct the suite FAILS with "XPASS(strict)". That is the signal to DELETE the xfail marker — not
+  to revert your work, and never to weaken the assertion.
+
+  Anomaly circuit-breaker (homelab FU-069): if you detect the LOOP misbehaving — an open PR already
+  exists for this issue and round, duplicate bot comments are piling up, or the issue's labels
+  contradict the dispatch you were given — do NOT work around it. Run
+  `gh issue edit {{ issue }} --add-label agent/error`, post ONE comment starting exactly
+  `AGENT_ERROR: <one line: what you observed>`, and END the run without pushing. The label is
+  human-first; automation (including you) never removes it or works past it.
+
+  Hard rules:
+  - Do NOT edit: `.agents/`, `.github/`, `agent-base/Dockerfile`, `agent-base/devbox.json`,
+    `agent-base/devbox.lock`, `devbox.json`, or anything secret — UNLESS the issue explicitly
+    authorizes it in a `Touches:` line. Default scope is the harness sources + `tests/`. A build
+    task is the class most likely to WANT one of these (a new tool, a new workflow step, a new
+    package); wanting it does not unban it — see Infeasible scope below.
+  - Branch `fix/issue-{{ issue }}-<slug>` and PUSH IT EARLY — right after the first meaningful
+    commit, then again after each green step. If the run dies midway the branch survives and the
+    next round resumes from it instead of re-deriving from scratch. NEVER push to master.
+  - If the deliverable turns out to ALREADY EXIST in the current code, STOP and report that with
+    the evidence (the file and the passing test) — do not build a parallel second copy of it, and
+    do not weaken an assertion to force green.
+
+  Infeasible scope (retro r3 F4): if the deliverable REQUIRES a path in the Hard-rules ban list
+  above, or a resource this pod does not have (cluster access, live API credentials, a sibling-repo
+  checkout), it is not implementable as written. Do NOT rescope it yourself and do NOT half-build
+  it: post ONE comment starting exactly `AGENT_INFEASIBLE: <the path or resource>` — first
+  characters of the comment, nothing before it — say in a sentence what the deliverable needed and
+  why the pod cannot supply it, and END the run without pushing. The coordinator's scan reads that
+  marker and parks the issue `agent/blocked` for a human instead of re-dispatching it, so this
+  costs one sub-minute exit rather than a re-ridden session. Do everything you CAN deliver first
+  if part of the issue is inside your reach — then the marker names only the part that is not.
+
+  - PR body: `Fixes #{{ issue }}` ONLY if this PR delivers every acceptance item in the issue; if
+    the round scoped any item out — including one the dispatch comment itself scoped out — write
+    `Refs #{{ issue }}` instead, plus one line naming what remains. PRs here target master, so that
+    keyword genuinely closes the issue on merge. The body must also NAME the acceptance gate and
+    show its observed PASS output.
+
+prompt: |
+  Build the deliverable described in GitHub issue #{{ issue }} for this repo, following the
+  instructions exactly. Use the `developer` tools (read/edit files; run `devbox run ci`,
+  `devbox run scan-secrets`, `git`, `gh`). When done, report: what you built, the acceptance gate
+  you RAN and its observed result, the tests added, the final `devbox run ci` result, the branch
+  name, and the PR URL.
+
+parameters:
+  - key: issue
+    input_type: string
+    requirement: required
+    description: "GitHub issue number (carries the deliverables + acceptance criteria)."
+
+extensions:
+  - type: builtin
+    name: developer
+    timeout: 900
+    bundled: true
+
+# ── Self-verification: keep going until the real gate is green ────────────────────────────────
+retry:
+  max_retries: 3
+  checks:
+    - type: shell
+      command: "devbox run ci"
+  on_failure: "devbox run ci 2>&1 | tail -40"
+
+# ── Structured result. `ci_passed`, `branch` and `pr_url` are the keys agent-finalize's
+# parse_outcome() actually lifts into the run stats — rename one and it stops reaching the
+# coordinator, silently. The build-specific keys below carry the acceptance story to the reviewer.
+response:
+  json_schema:
+    type: object
+    additionalProperties: false
+    required: [built, ci_passed, branch]
+    properties:
+      built:         { type: boolean, description: "Did you produce the deliverable (vs concluding there was nothing to build)?" }
+      deliverable:   { type: string,  description: "One line: what you built." }
+      proven_by:     { type: string,  description: "The REAL acceptance gate you RAN and its observed result." }
+      files_changed: { type: array, items: { type: string } }
+      tests_added:   { type: array, items: { type: string }, description: "Test ids added or un-xfailed." }
+      ci_passed:     { type: boolean, description: "Did `devbox run ci` pass end-to-end?" }
+      branch:        { type: string }
+      pr_url:        { type: string }
+
+# ── Model is NOT pinned in git ────────────────────────────────────────────────────────────────
+# OpenRouter ids rotate fast, so the model is a CALL-TIME arg: `agent-session.sh --model <id>`
+# (→ GOOSE_MODEL). Provenance is recorded per-commit by the entrypoint (Agent-Model trailer).
+settings:
+  goose_provider: "openrouter"
+  temperature: 0.1
