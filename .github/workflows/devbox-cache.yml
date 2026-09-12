@@ -28,7 +28,7 @@ on:
 
 jobs:
   publish:
-    uses: teststuffstash/homelab/.github/workflows/devbox-cache.reusable.yml@master
+    uses: teststuffstash/homelab/.github/workflows/devbox-cache.reusable.yml@a5a1560c885f7bf23c46ac21e7118c5e628e7238 # master
     permissions:
       contents: read
       packages: write
