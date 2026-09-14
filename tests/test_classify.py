@@ -41,6 +41,37 @@ class TestFailureSignatures:
         s, e = af.classify(logfile(TRUNCATION_LOG), {})
         assert (s, e) == ("harness-death", "goose-32602-truncation")
 
+    def test_the_class_name_in_content_is_not_the_code(self, af, logfile):
+        """homelab#1705, 2026-09-14: homelab#1668 r1 (goose, deepseek) edited router tests that
+        spell `goose-32602-truncation`, read docs saying "(goose `-32602`)", opened homelab#1704 —
+        and struck. The TOKEN is content; only `-32602: …` / `"code": -32602` is the death."""
+        content = (
+            'assert strikes == [("deepseek", "", "goose-32602-truncation")]\\n'
+            "| `harness-death` (goose `-32602`), `auth-storm` | strike |\\n"
+            "- `goose-32602-truncation`: operator 2026-09-14 direction\\n"
+        )
+        assert af.failure_signature(content, harness="goose") is None
+        s, e = af.classify(logfile(content), {"harness": "goose", "pr_url": "http://x/1704"})
+        assert (s, e) == ("clean", "")
+        # …while the real code, in either of its two shapes, still is the death.
+        assert af.failure_signature("-32602: Could not interpret tool use parameters\\n",
+                                    harness="goose") == ("harness-death", "goose-32602-truncation")
+        assert af.failure_signature('{"code": -32602, "message": "Invalid params"}\\n',
+                                    harness="goose") == ("harness-death", "goose-32602-truncation")
+
+    def test_a_claude_ride_cannot_die_of_goose_32602(self, af, logfile):
+        """homelab#1692 r1 (haiku, HARNESS=claude), 2026-09-14: wrote "`goose-32602-truncation`:
+        operator direction" into its own report, opened homelab#1699 — struck as a goose death.
+        `-32602` is goose's MCP JSON-RPC code; the claude harness never emits it."""
+        log = "-32602: Could not interpret tool use parameters\n" \
+              "- `goose-32602-truncation`: operator 2026-09-14 direction\n"
+        assert af.failure_signature(log, harness="claude") is None
+        s, e = af.classify(logfile(log), {"harness": "claude", "pr_url": "http://x/1699"})
+        assert (s, e) == ("clean", "")
+        # The harness-neutral truncation signatures still count for claude.
+        assert af.failure_signature("context_length_exceeded\\n", harness="claude") == (
+            "harness-death", "goose-32602-truncation")
+
     def test_budget_account_outranks_everything(self, af, logfile):
         """Account-credit exhaustion: 402 payment required → budget-exhausted-account."""
         log = TRUNCATION_LOG + "402 payment required\n"
