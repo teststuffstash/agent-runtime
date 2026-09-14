@@ -341,7 +341,7 @@ def _check_stale_evidence(stats):
               % (max_evidence_dt.isoformat(), head_dt.isoformat()), flush=True)
 
 
-def failure_signature(text, ci_passed=None, watchdog=""):
+def failure_signature(text, ci_passed=None, watchdog="", harness=""):
     """The dominant machine-detectable failure in a run log → (exit_status, error_class), or None.
 
     Pure over the log text so the precedence is testable, and shared: `classify` and
@@ -350,6 +350,11 @@ def failure_signature(text, ci_passed=None, watchdog=""):
 
     Precedence: a broken key dooms the whole run, so it outranks the truncation it usually ends on;
     ≥5 auth failures = a storm, not a transient token refresh.
+
+    `harness` gates the harness-SPECIFIC signatures: `-32602` is goose's MCP JSON-RPC code, so a
+    claude-code ride cannot die of it — homelab#1705 (2026-09-14) struck a haiku/claude ride as
+    `goose-32602-truncation` because its own summary text named the class. An empty harness
+    (older callers, tests) keeps the goose behaviour.
 
     Budget-403 is split into three sub-classes (#85): account-credit (budget-exhausted-account),
     per-key-limit (budget-exhausted-key), and residual (http-403-other). The patterns are defined
@@ -380,8 +385,14 @@ def failure_signature(text, ci_passed=None, watchdog=""):
     # infra failure is never counted as a completed round. Outranks truncation/auth-storm
     # because a directive read failure dooms the round before any work can begin.
     ratelimit = n(r"GraphQL:\s*API rate limit|API rate limit.*installation ID")
-    truncation = n(r"-32602|response may have been truncated|maximum context length|"
-                   r"context_length_exceeded")
+    # `-32602` must be the CODE, not the NAME: a ride whose content (issue body, docs, router
+    # tests, its own report) mentions `goose-32602-truncation` or "(goose `-32602`)" is text, not a
+    # death — homelab#1705: three false strikes in one afternoon, two of them rides that opened a
+    # PR (homelab#1704 merged, #1699 in review). The real shape is `-32602: <message>` or the
+    # JSON-RPC `"code": -32602`; the lookbehind refuses a word char, backtick or hyphen before it.
+    goose_only = harness in ("goose", "")
+    truncation = (n(r"(?<![\w`-])-32602(?=[:,\s]|$)") if goose_only else 0) \
+        + n(r"response may have been truncated|maximum context length|context_length_exceeded")
     panic = n(r"thread '.*' panicked|panicked at|fatal runtime error")
     timeout = n(r"context deadline exceeded|operation timed out|request timed out|"
                 r"timeout of \d+\s*ms exceeded")
@@ -504,7 +515,7 @@ def classify(log_path, stats):
     # `clean` and poison the model-health pivot with a success that shipped nothing (oracle-fleet#1
     # attempt 1). Those runs are `no-artifact` now.
     succeeded = bool(stats.get("pr_url"))
-    fail = failure_signature(text, ci_passed, _watchdog_class())
+    fail = failure_signature(text, ci_passed, _watchdog_class(), stats.get("harness", ""))
 
     # #85/#91: carry the matched budget log line into stats so the discriminator survives the pod
     # (homelab#879's third deliverable). The three sub-classes (account-credit, per-key-limit,
@@ -631,7 +642,8 @@ def salvage_push(stats, log_path=""):
     could not be established (#33) — the strike comment must not turn "I could not tell" into
     "there is nothing to resume"."""
     if stats.get("pr_url") and not died_this_round(
-            failure_signature(_log_text(log_path), stats.get("ci_passed"), _watchdog_class()),
+            failure_signature(_log_text(log_path), stats.get("ci_passed"), _watchdog_class(),
+                              stats.get("harness", "")),
             stats):
         return
     wd, base, branch = _resolve_branch()
