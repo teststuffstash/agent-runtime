@@ -168,6 +168,13 @@ class TestBudgetSelfReference:
         sig = af.failure_signature(af_source, harness="goose")
         assert sig is None or sig[0] != "budget-403", sig
 
+    def test_prose_naming_the_other_arms_is_not_a_budget_death(self, af):
+        """Acceptance: the key and residual arms get the same treatment. Backticks are markdown —
+        a ride writing ABOUT this class, not a provider message."""
+        prose = ("the key arm matches `key limit exceeded`, the residual arm `quota exceeded`\n"
+                 "and `insufficient quota`; neither matched on this run.\n")
+        assert af.failure_signature(prose, harness="goose") is None
+
     def test_a_real_provider_402_still_classifies(self, af):
         """Acceptance: the documented OpenRouter body — the shape the hardening must keep."""
         body = ('{"error": {"code": 402, "message": "Insufficient credits. '
