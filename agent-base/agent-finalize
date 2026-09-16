@@ -288,7 +288,12 @@ def _watchdog_class():
 #     documented envelope puts it first, and a forward-only lookahead silently missed that order
 #     and let a genuine account-exhaustion 402 go unclassified (#136 review). `fund(s)` is
 #     master's wording (it predates #85) and is gated exactly like `credit(s)` — the shape decides
-#     WHICH lines count, never which wordings the arm knows;
+#     WHICH lines count, never which wordings the arm knows. `payment required` is master's fourth
+#     alternation branch, and it is retained UNDER the same shape gate rather than beside it: a
+#     bare branch re-opens this issue, because the phrase is both this constant's own branch and
+#     the prose of any issue about this class (the incident fixture's "a real 402 would be served
+#     as payment required" has no code, envelope or URL). A reason phrase carrying no 402 evidence
+#     on its line is therefore out of the arm by ruling — a deliberate, pinned narrowing;
 #   * _budget_text() drops the log lines that ARE this file's pattern source (see its docstring).
 # The key and residual arms need no shape gate of their own: their wordings are complete provider
 # messages, never the fragments a ride writing ABOUT this class produces, and the tests pin them as
@@ -298,7 +303,8 @@ _BUDGET_ACCOUNT_SHAPE_RE = (
     r"[\"']?code[\"']?\s*[:=]\s*402\b"
     r"|openrouter\.ai/(?:settings/)?credits"
 )
-_BUDGET_ACCOUNT_PHRASE_RE = r"insufficient (?:credits?|funds?)|out of (?:credits?|funds?)"
+_BUDGET_ACCOUNT_PHRASE_RE = (r"insufficient (?:credits?|funds?)|out of (?:credits?|funds?)"
+                             r"|payment required")
 _BUDGET_ACCOUNT_RE = (
     r"\b402\b[^\w|]{0,3}payment required"
     r"|(?=[^\n]*(?:" + _BUDGET_ACCOUNT_SHAPE_RE + r"))"
