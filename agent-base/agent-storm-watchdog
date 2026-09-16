@@ -119,6 +119,30 @@ _distinct() {
 repeat_share() { tail -n "$REPEAT_WINDOW" "$1" 2>/dev/null | _norm | _share; }
 tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n "$REPEAT_TAIL" | _distinct; }
 
+# Block-repetition detection: identical (toolRequest, toolResponse) pairs repeated 3+ times.
+# A ~35-line block repeated on one tool call produces only 5-8% on log-line frequency but is
+# detectable from the goose session db.
+has_block_repetition() {
+  local db_path="$HOME/.local/share/goose/sessions/sessions.db"
+  [ -f "$db_path" ] || return 1
+  # Count pairs and report if any pair appears 3+ times (indicating a repeating block).
+  sqlite3 "$db_path" 2>/dev/null <<'SQL' | grep -q '^1$'
+SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END FROM (
+  WITH tool_pairs AS (
+    SELECT
+      json_extract(content_json, '$.toolCall.value.name') as tool_name,
+      substr(json_extract(content_json, '$.toolResult.value'), 1, 100) as result_hash,
+      COUNT(*) as cnt
+    FROM messages
+    WHERE (content_json LIKE '%toolCall%' AND content_json LIKE '%toolResult%')
+    GROUP BY tool_name, result_hash
+  )
+  SELECT * FROM tool_pairs WHERE cnt >= 3
+);
+SQL
+}
+
+
 # Live arithmetic at EOF, printed. This is what the poll below sees RIGHT NOW, through the three
 # helpers above and nothing else — the seam that lets a test assert `--check`'s in-awk rewrite of
 # them still agrees number-for-number (on a log shorter than $REPEAT_WINDOW the walk scores exactly
@@ -252,6 +276,7 @@ prev_hot=0
 prev_total=0
 prev_rep_hot=0
 prev_lines=0
+prev_block_hot=0
 while :; do
   sleep "$POLL_S"
   [ -f "$LOG" ] || continue
@@ -287,6 +312,19 @@ while :; do
     prev_rep_hot="$rep_hot"
     prev_lines="$lines"
   fi
+  # Block-repetition rule: N consecutive identical (toolRequest, toolResponse) pairs from the
+  # goose session db. Same two-poll confirmation as above. Write marker before kill so finalize
+  # classifies it as block-repetition.
+  block_hot=0
+  if has_block_repetition; then
+    block_hot=1
+  fi
+  if [ "$block_hot" = 1 ] && [ "$prev_block_hot" = 1 ]; then
+    echo "block-repetition" > "$MARKER" 2>/dev/null || true
+    terminate_harness "identical (toolRequest, toolResponse) pairs repeated in goose session db on two consecutive polls — block repetition"
+    exit 0
+  fi
+  prev_block_hot="$block_hot"
   [ "$dens" -ge "$THRESHOLD" ] && prev_hot=1 || prev_hot=0
   prev_total="$total"
 done
