@@ -30,6 +30,7 @@ from datetime import datetime
 
 START_EPOCH = "/tmp/agent-start-epoch"
 USAGE_START = "/tmp/agent-usage-start"
+PRE_LOOP_HEAD = "/tmp/agent-pre-loop-head"
 # One line per CLOSED in-pod phase, appended by `agent-finalize --mark` (FU-160 / #66). Written by
 # the entrypoint for the spans that end BEFORE --snapshot; read once, at finalize.
 PHASE_MARKS = "/tmp/agent-phase-marks"
@@ -204,6 +205,13 @@ def snapshot():
     open(START_EPOCH, "w").write(str(int(time.time())))
     usage = or_usage()
     open(USAGE_START, "w").write("" if usage is None else repr(usage))
+    wd = os.environ.get("WORKDIR", "/work/repo")
+    try:
+        head = subprocess.run(["git", "-C", wd, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        head = ""
+    open(PRE_LOOP_HEAD, "w").write(head)
 
 
 def parse_outcome(log_path):
@@ -341,6 +349,83 @@ def _check_stale_evidence(stats):
               % (max_evidence_dt.isoformat(), head_dt.isoformat()), flush=True)
 
 
+def _goose_cap_reached(text):
+    """Detect if goose reached the turn cap. Only goose emits this signature; claude harness has
+    a different form ('Reached max turns'). Match as a message/error, not arbitrary content."""
+    # The goose cap appears as an error message in the log, typically at the start of a line
+    # or after typical log markers. Avoid matching it in user content (docs, issue bodies).
+    return re.search(
+        r"(?:^|\n)\s*I've reached the maximum number of actions",
+        text,
+        re.MULTILINE
+    ) is not None
+
+
+def _has_tool_result_progress():
+    """Check goose session db for tool-result progress. A cap death with zero progress is tool-loop;
+    with progress it's just turn-cap. Reads ~/.local/share/goose/sessions/sessions.db (sqlite)."""
+    try:
+        import sqlite3
+        db_path = os.path.expanduser("~/.local/share/goose/sessions/sessions.db")
+        if not os.path.exists(db_path):
+            return True  # No db = assume progress (conservative: if no db, not a tool-loop)
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # Get all messages in order; toolResponse entries represent tool results.
+        cursor.execute("SELECT id, content_json FROM messages ORDER BY id")
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Count toolResponse messages (tool results).
+        tool_responses = 0
+        for row in rows:
+            try:
+                content = json.loads(row["content_json"] or "{}")
+                # A toolResponse has a toolResult key.
+                if isinstance(content, dict) and "toolResult" in content:
+                    tool_responses += 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # If there are any tool results, there was progress.
+        return tool_responses > 0
+    except Exception:
+        # Any error reading the db: assume progress (conservative).
+        return True
+
+
+def _is_no_op_round(stats):
+    """Detect if the LLM loop left HEAD unmoved — both homelab#1692 rounds 2 and 3 exited `clean`
+    with `ci_passed: true` but HEAD was byte-identical before and after.
+
+    Compares pre-loop HEAD (recorded at snapshot time) against post-loop HEAD."""
+    try:
+        # Read pre-loop HEAD from the snapshot file.
+        try:
+            with open(PRE_LOOP_HEAD) as f:
+                pre_loop_head = f.read().strip()
+        except Exception:
+            return False
+        if not pre_loop_head:
+            return False
+
+        # Get current HEAD.
+        wd = os.environ.get("WORKDIR", "/work/repo")
+        result = subprocess.run(
+            ["git", "-C", wd, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+        post_loop_head = result.stdout.strip()
+
+        # No-op iff both are non-empty and equal.
+        return pre_loop_head == post_loop_head
+    except Exception:
+        return False
+
+
 def failure_signature(text, ci_passed=None, watchdog="", harness=""):
     """The dominant machine-detectable failure in a run log → (exit_status, error_class), or None.
 
@@ -414,6 +499,15 @@ def failure_signature(text, ci_passed=None, watchdog="", harness=""):
         # "budget-exhausted" is the cause worth striking on — the repetition is that death's
         # symptom. When no key/billing signature is present, this is the real class.
         return "harness-death", "repetition-loop"
+    if watchdog == "block-repetition":
+        # Block repetition: N consecutive identical (toolRequest, toolResponse) pairs detected
+        # from the goose session db. Different from line-frequency repetition.
+        return "harness-death", "block-repetition"
+    # Turn-cap detection (goose only): distinguish from truncation, which is log-based.
+    if goose_only and _goose_cap_reached(text):
+        if not _has_tool_result_progress():
+            return "harness-death", "tool-loop"
+        return "harness-death", "turn-cap"
     if truncation:
         return "harness-death", "goose-32602-truncation"
     if panic:
@@ -534,6 +628,9 @@ def classify(log_path, stats):
     if succeeded:
         if ci_passed is False:
             return "ci-failed", "ci-red"
+        # Detect no-op: LLM loop left HEAD unmoved (homelab#1692 rounds 2 and 3).
+        if _is_no_op_round(stats):
+            return "no-op", ""
         return "clean", ""
     if fail:
         return fail

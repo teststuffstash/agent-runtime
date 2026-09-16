@@ -119,6 +119,72 @@ _distinct() {
 repeat_share() { tail -n "$REPEAT_WINDOW" "$1" 2>/dev/null | _norm | _share; }
 tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n "$REPEAT_TAIL" | _distinct; }
 
+# Block-repetition detection: identical (toolRequest, toolResponse) pairs repeated 3+ times.
+# A ~35-line block repeated on one tool call produces only 5-8% on log-line frequency but is
+# detectable from the goose session db.
+has_block_repetition() {
+  local db_path="$HOME/.local/share/goose/sessions/sessions.db"
+  [ -f "$db_path" ] || return 1
+  # Detect N consecutive identical (toolRequest, toolResponse) pairs.
+  # Pair adjacent rows by id: a toolCall row with the toolResponse that answers it.
+  # Fire if ≥3 consecutive identical pairs found.
+  python3 - "$db_path" <<'PY'
+import sqlite3
+import sys
+import json
+db_path = sys.argv[1]
+try:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, content_json FROM messages ORDER BY id")
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Build list of (tool_name, result) pairs from adjacent toolCall/toolResponse rows.
+    pairs = []
+    i = 0
+    while i < len(rows):
+        try:
+            curr_id, curr_json = rows[i]
+            curr_obj = json.loads(curr_json or "{}")
+            # Look for a toolCall.
+            if isinstance(curr_obj, dict) and "toolCall" in curr_obj:
+                tool_call = curr_obj.get("toolCall", {}).get("value", {})
+                tool_name = tool_call.get("name", "")
+                # Next row should be the toolResponse.
+                if i + 1 < len(rows):
+                    next_id, next_json = rows[i + 1]
+                    next_obj = json.loads(next_json or "{}")
+                    if isinstance(next_obj, dict) and "toolResult" in next_obj:
+                        tool_result = next_obj.get("toolResult", {}).get("value", "")
+                        # Store a canonical representation of the pair.
+                        pairs.append((tool_name, str(tool_result)[:100]))
+                        i += 2
+                        continue
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+        i += 1
+
+    # Count consecutive identical pairs.
+    if not pairs:
+        sys.exit(1)
+    max_consecutive = 1
+    current_consecutive = 1
+    for i in range(1, len(pairs)):
+        if pairs[i] == pairs[i - 1]:
+            current_consecutive += 1
+            max_consecutive = max(max_consecutive, current_consecutive)
+        else:
+            current_consecutive = 1
+
+    # Fire if we found ≥3 consecutive identical pairs.
+    sys.exit(0 if max_consecutive >= 3 else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+
 # Live arithmetic at EOF, printed. This is what the poll below sees RIGHT NOW, through the three
 # helpers above and nothing else — the seam that lets a test assert `--check`'s in-awk rewrite of
 # them still agrees number-for-number (on a log shorter than $REPEAT_WINDOW the walk scores exactly
@@ -252,6 +318,7 @@ prev_hot=0
 prev_total=0
 prev_rep_hot=0
 prev_lines=0
+prev_block_hot=0
 while :; do
   sleep "$POLL_S"
   [ -f "$LOG" ] || continue
@@ -287,6 +354,19 @@ while :; do
     prev_rep_hot="$rep_hot"
     prev_lines="$lines"
   fi
+  # Block-repetition rule: N consecutive identical (toolRequest, toolResponse) pairs from the
+  # goose session db. Same two-poll confirmation as above. Write marker before kill so finalize
+  # classifies it as block-repetition.
+  block_hot=0
+  if has_block_repetition; then
+    block_hot=1
+  fi
+  if [ "$block_hot" = 1 ] && [ "$prev_block_hot" = 1 ]; then
+    echo "block-repetition" > "$MARKER" 2>/dev/null || true
+    terminate_harness "identical (toolRequest, toolResponse) pairs repeated in goose session db on two consecutive polls — block repetition"
+    exit 0
+  fi
+  prev_block_hot="$block_hot"
   [ "$dens" -ge "$THRESHOLD" ] && prev_hot=1 || prev_hot=0
   prev_total="$total"
 done
