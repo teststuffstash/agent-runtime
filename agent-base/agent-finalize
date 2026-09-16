@@ -30,6 +30,7 @@ from datetime import datetime
 
 START_EPOCH = "/tmp/agent-start-epoch"
 USAGE_START = "/tmp/agent-usage-start"
+PRE_LOOP_HEAD = "/tmp/agent-pre-loop-head"
 # One line per CLOSED in-pod phase, appended by `agent-finalize --mark` (FU-160 / #66). Written by
 # the entrypoint for the spans that end BEFORE --snapshot; read once, at finalize.
 PHASE_MARKS = "/tmp/agent-phase-marks"
@@ -204,6 +205,13 @@ def snapshot():
     open(START_EPOCH, "w").write(str(int(time.time())))
     usage = or_usage()
     open(USAGE_START, "w").write("" if usage is None else repr(usage))
+    wd = os.environ.get("WORKDIR", "/work/repo")
+    try:
+        head = subprocess.run(["git", "-C", wd, "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        head = ""
+    open(PRE_LOOP_HEAD, "w").write(head)
 
 
 def parse_outcome(log_path):
@@ -391,22 +399,29 @@ def _is_no_op_round(stats):
     """Detect if the LLM loop left HEAD unmoved — both homelab#1692 rounds 2 and 3 exited `clean`
     with `ci_passed: true` but HEAD was byte-identical before and after.
 
-    Conservative detection: only when the branch is on master (no branch was created or it was
-    merged), which means no new commits were made during the LLM loop."""
+    Compares pre-loop HEAD (recorded at snapshot time) against post-loop HEAD."""
     try:
+        # Read pre-loop HEAD from the snapshot file.
+        try:
+            with open(PRE_LOOP_HEAD) as f:
+                pre_loop_head = f.read().strip()
+        except Exception:
+            return False
+        if not pre_loop_head:
+            return False
+
+        # Get current HEAD.
         wd = os.environ.get("WORKDIR", "/work/repo")
-        # Get current branch name.
         result = subprocess.run(
-            ["git", "-C", wd, "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", "-C", wd, "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return False
-        current_branch = result.stdout.strip()
+        post_loop_head = result.stdout.strip()
 
-        # Only mark as no-op if we're back on master/main (the branch was either never created
-        # or was somehow reverted). Stays conservative to avoid false positives.
-        return current_branch in ("master", "main")
+        # No-op iff both are non-empty and equal.
+        return pre_loop_head == post_loop_head
     except Exception:
         return False
 

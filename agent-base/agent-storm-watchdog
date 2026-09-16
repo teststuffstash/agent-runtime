@@ -125,21 +125,63 @@ tail_distinct() { tail -n "$REPEAT_TAIL_SCAN" "$1" 2>/dev/null | _norm | tail -n
 has_block_repetition() {
   local db_path="$HOME/.local/share/goose/sessions/sessions.db"
   [ -f "$db_path" ] || return 1
-  # Count pairs and report if any pair appears 3+ times (indicating a repeating block).
-  sqlite3 "$db_path" 2>/dev/null <<'SQL' | grep -q '^1$'
-SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END FROM (
-  WITH tool_pairs AS (
-    SELECT
-      json_extract(content_json, '$.toolCall.value.name') as tool_name,
-      substr(json_extract(content_json, '$.toolResult.value'), 1, 100) as result_hash,
-      COUNT(*) as cnt
-    FROM messages
-    WHERE (content_json LIKE '%toolCall%' AND content_json LIKE '%toolResult%')
-    GROUP BY tool_name, result_hash
-  )
-  SELECT * FROM tool_pairs WHERE cnt >= 3
-);
-SQL
+  # Detect N consecutive identical (toolRequest, toolResponse) pairs.
+  # Pair adjacent rows by id: a toolCall row with the toolResponse that answers it.
+  # Fire if ≥3 consecutive identical pairs found.
+  python3 - "$db_path" <<'PY'
+import sqlite3
+import sys
+import json
+db_path = sys.argv[1]
+try:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, content_json FROM messages ORDER BY id")
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Build list of (tool_name, result) pairs from adjacent toolCall/toolResponse rows.
+    pairs = []
+    i = 0
+    while i < len(rows):
+        try:
+            curr_id, curr_json = rows[i]
+            curr_obj = json.loads(curr_json or "{}")
+            # Look for a toolCall.
+            if isinstance(curr_obj, dict) and "toolCall" in curr_obj:
+                tool_call = curr_obj.get("toolCall", {}).get("value", {})
+                tool_name = tool_call.get("name", "")
+                # Next row should be the toolResponse.
+                if i + 1 < len(rows):
+                    next_id, next_json = rows[i + 1]
+                    next_obj = json.loads(next_json or "{}")
+                    if isinstance(next_obj, dict) and "toolResult" in next_obj:
+                        tool_result = next_obj.get("toolResult", {}).get("value", "")
+                        # Store a canonical representation of the pair.
+                        pairs.append((tool_name, str(tool_result)[:100]))
+                        i += 2
+                        continue
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+        i += 1
+
+    # Count consecutive identical pairs.
+    if not pairs:
+        sys.exit(1)
+    max_consecutive = 1
+    current_consecutive = 1
+    for i in range(1, len(pairs)):
+        if pairs[i] == pairs[i - 1]:
+            current_consecutive += 1
+            max_consecutive = max(max_consecutive, current_consecutive)
+        else:
+            current_consecutive = 1
+
+    # Fire if we found ≥3 consecutive identical pairs.
+    sys.exit(0 if max_consecutive >= 3 else 1)
+except Exception:
+    sys.exit(1)
+PY
 }
 
 
