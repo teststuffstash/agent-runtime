@@ -208,6 +208,27 @@ class TestBudgetSelfReference:
             assert af.failure_signature(body, harness="goose") == (
                 "budget-403", "budget-exhausted-account"), body
 
+    def test_the_reason_phrase_classifies_only_with_402_evidence(self, af):
+        """`payment required` is retained under the shape gate, not beside it (#136 review, finding 3).
+
+        Master's account arm had `payment required` as its own bare alternation branch, so a line
+        carrying only the reason phrase classified as budget-exhausted-account. Restoring that bare
+        branch re-opens this issue verbatim: the phrase is this constant's own alternation branch
+        AND the prose of any issue written about this class — the incident fixture above contains
+        "a real 402 would be served as payment required", with no status code, no envelope and no
+        URL, and a bare branch strikes on it (that is the test that goes red as the proof).
+
+        So the phrase is admitted exactly like every other account wording: gated on the 402 shape
+        on the same line. The 402-shaped renderings classify; the bare reason phrase is inert.
+        """
+        for body in ("HTTP/1.1 402 Payment Required\n",
+                     '{"error":{"code":402,"message":"Payment Required"}}\n',
+                     'Error code: 402 - {"error":{"message":"Payment Required"}}\n'):
+            assert af.failure_signature(body, harness="goose") == (
+                "budget-403", "budget-exhausted-account"), body
+        # No 402 evidence on the line: the reason phrase alone is not a provider response.
+        assert af.failure_signature("Error: Payment Required\n", harness="goose") is None
+
     def test_the_carry_holds_the_provider_line_not_the_source_line(self, af):
         """Acceptance: #91's conduit carries a provider response, and carries nothing at all when
         the only text naming a pattern is the classifier's own source."""
