@@ -280,27 +280,24 @@ def _watchdog_class():
 # second branch is the literal `402 payment`, and the classifier struck its model for a 402 the
 # provider never served (the account held $10.30 against a $0.25 floor; the ride cost $0.0685 of a
 # $1.00 key). Two guards, both consumed by failure_signature():
-#   * the account arm matches the provider's 402 SHAPE — the status code joined to the reason
-#     phrase, the JSON error envelope's code, or the top-up URL its message points at — never the
-#     bare phrase, which is this constant's own alternation branch and the prose of any issue
-#     written about this class;
+#   * the account arm matches the provider's 402 SHAPE on the same line as the credit/fund wording
+#     — the status code joined to the reason phrase, the JSON error envelope's code field, or the
+#     top-up URL its message points at — never the bare phrase, which is this constant's own
+#     alternation branch and the prose of any issue written about this class. Both anchors are
+#     lookaheads from the same position, so the code may sit before or after the wording: the
+#     documented envelope puts it first, and a forward-only lookahead silently missed that order
+#     and let a genuine account-exhaustion 402 go unclassified (#136 review). `fund(s)` is
+#     master's wording (it predates #85) and is gated exactly like `credit(s)` — the shape decides
+#     WHICH lines count, never which wordings the arm knows;
 #   * _budget_text() drops the log lines that ARE this file's pattern source (see its docstring).
 # The key and residual arms need no shape gate of their own: their wordings are complete provider
 # messages, never the fragments a ride writing ABOUT this class produces, and the tests pin them as
 # bare lines. They get the same _budget_text() guard — which is what makes the source lines that
 # define them inert, and what covers the backtick-quoted prose that names them.
-# The account arm matches the provider's 402 SHAPE on the same line as the credit/fund wording:
-# the status line, the JSON error envelope's code field, or the top-up URL its message points at.
-# The bare wording alone is this constant's own alternation branch and the prose of any issue
-# written about this class (#136), so it is never enough by itself. Both anchors are lookaheads
-# from the same position, so the code may sit before or after the wording — the documented
-# envelope puts it first, and a forward-only lookahead silently missed that order (#136 review).
 _BUDGET_ACCOUNT_SHAPE_RE = (
     r"[\"']?code[\"']?\s*[:=]\s*402\b"
     r"|openrouter\.ai/(?:settings/)?credits"
 )
-# `fund(s)` is master's wording (it predates #85) and is gated exactly like `credit(s)`: the shape
-# decides WHICH lines count, never which wordings the arm knows (#136 review).
 _BUDGET_ACCOUNT_PHRASE_RE = r"insufficient (?:credits?|funds?)|out of (?:credits?|funds?)"
 _BUDGET_ACCOUNT_RE = (
     r"\b402\b[^\w|]{0,3}payment required"
