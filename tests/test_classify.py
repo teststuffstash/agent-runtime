@@ -182,6 +182,32 @@ class TestBudgetSelfReference:
         assert af.failure_signature(body, harness="goose") == (
             "budget-403", "budget-exhausted-account")
 
+    def test_a_real_402_envelope_is_anchor_order_independent(self, af):
+        """The envelope's code is an anchor in its own natural key order (#136 review, finding 1).
+
+        `{"code": 402, "message": "Insufficient credits"}` is the documented envelope's shape with
+        the code FIRST, and no top-up URL. A lookahead that only scans forward from the wording
+        sees nothing ahead of it there and lets a genuine account-exhaustion 402 go unclassified —
+        the opposite failure mode from the self-strike this suite pins, still wrong.
+        """
+        for body in ('{"code": 402, "message": "Insufficient credits"}\n',
+                     '{"message": "Insufficient credits", "code": 402}\n'):
+            assert af.failure_signature(body, harness="goose") == (
+                "budget-403", "budget-exhausted-account"), body
+
+    def test_the_fund_wording_still_classifies(self, af):
+        """`insufficient fund(s)` predates #85 and survives the shape gate (#136 review, finding 2).
+
+        Master's account arm matched `insufficient (credit|fund)` unconditionally, so a 402-shaped
+        payload worded with "funds" classified as budget-exhausted-account and must keep doing so:
+        the shape gate narrows WHICH lines count, never which wordings the arm knows.
+        """
+        for body in ('{"code": 402, "message": "Insufficient funds in account"}\n',
+                     '{"code": 402, "message": "Account is out of funds"}\n',
+                     '{"error":{"code":402,"message":"insufficient fund"}}\n'):
+            assert af.failure_signature(body, harness="goose") == (
+                "budget-403", "budget-exhausted-account"), body
+
     def test_the_carry_holds_the_provider_line_not_the_source_line(self, af):
         """Acceptance: #91's conduit carries a provider response, and carries nothing at all when
         the only text naming a pattern is the classifier's own source."""
