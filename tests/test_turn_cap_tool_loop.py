@@ -126,7 +126,7 @@ class TestToolLoopDetection:
 class TestNoOpDetection:
     """no-op rounds: LLM loop left HEAD unmoved."""
 
-    def test_no_op_when_head_unchanged(self, af, logfile, tmp_path):
+    def test_no_op_when_head_unchanged(self, af, logfile, tmp_path, monkeypatch):
         """Pre-loop HEAD == post-loop HEAD = no-op round (on a work branch)."""
         # Create a mock git repo on a work branch.
         git_dir = tmp_path / "repo"
@@ -162,26 +162,19 @@ class TestNoOpDetection:
             capture_output=True,
             text=True,
         ).stdout.strip()
-        # Write pre-loop HEAD to the temp file.
-        pre_loop_file = tmp_path / "pre-loop-head"
-        pre_loop_file.write_text(head_commit)
-        with unittest.mock.patch.dict(os.environ, {
-            "WORKDIR": str(git_dir),
-            "agent-finalize:PRE_LOOP_HEAD": str(pre_loop_file),
-        }):
-            # Mock the PRE_LOOP_HEAD path in agent-finalize by patching it in the module.
-            import sys
-            import importlib
-            # Get the agent-finalize module through conftest's af fixture.
-            # Instead, just patch the file read directly.
-            with unittest.mock.patch("builtins.open", unittest.mock.mock_open(read_data=head_commit)):
-                s, e = af.classify(logfile("no changes\n"), {
-                    "pr_url": "http://x/1",
-                    "ci_passed": True,
-                })
+        # Write pre-loop HEAD to the standard location.
+        pre_loop_head_file = tmp_path / "pre-loop-head"
+        pre_loop_head_file.write_text(head_commit)
+        # Mock PRE_LOOP_HEAD in the module and set WORKDIR.
+        monkeypatch.setattr(af, "PRE_LOOP_HEAD", str(pre_loop_head_file))
+        monkeypatch.setenv("WORKDIR", str(git_dir))
+        s, e = af.classify(logfile("no changes\n"), {
+            "pr_url": "http://x/1",
+            "ci_passed": True,
+        })
         assert (s, e) == ("no-op", "")
 
-    def test_not_no_op_when_head_changed(self, af, logfile, tmp_path):
+    def test_not_no_op_when_head_changed(self, af, logfile, tmp_path, monkeypatch):
         """Pre-loop HEAD != post-loop HEAD = normal clean run, not no-op."""
         git_dir = tmp_path / "repo"
         git_dir.mkdir()
@@ -220,14 +213,16 @@ class TestNoOpDetection:
         (git_dir / "file.txt").write_text("changed")
         subprocess.run(["git", "add", "."], cwd=git_dir, capture_output=True)
         subprocess.run(["git", "commit", "-m", "fix"], cwd=git_dir, capture_output=True)
-        # Patch open to return the pre-loop HEAD when reading the marker file.
-        mock_open = unittest.mock.mock_open(read_data=pre_loop_head)
-        with unittest.mock.patch("builtins.open", mock_open):
-            with unittest.mock.patch.dict(os.environ, {"WORKDIR": str(git_dir)}):
-                s, e = af.classify(logfile("work done\n"), {
-                    "pr_url": "http://x/1",
-                    "ci_passed": True,
-                })
+        # Write pre-loop HEAD to temp file.
+        pre_loop_head_file = tmp_path / "pre-loop-head"
+        pre_loop_head_file.write_text(pre_loop_head)
+        # Mock PRE_LOOP_HEAD in the module and set WORKDIR.
+        monkeypatch.setattr(af, "PRE_LOOP_HEAD", str(pre_loop_head_file))
+        monkeypatch.setenv("WORKDIR", str(git_dir))
+        s, e = af.classify(logfile("work done\n"), {
+            "pr_url": "http://x/1",
+            "ci_passed": True,
+        })
         assert (s, e) == ("clean", "")
 
 
