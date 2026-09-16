@@ -15,6 +15,26 @@ TRUNCATION_LOG = (
 # stopped existing. Kept next to TRUNCATION_LOG because the pair is the whole #36 distinction.
 REPORTED_END = {"reproduced": True, "ci_passed": True, "branch": "fix/issue-1-x"}
 
+# agent-runtime#136, the incident transcript. Round 1 of #134 was dispatched to reconcile this very
+# classifier, so its log quoted agent-finalize's budget constants verbatim — and `402 payment` is a
+# literal on the _BUDGET_ACCOUNT_RE line, so the classifier matched the file against itself and
+# struck the model for a 402 the provider never served (the account held $10.30 against a $0.25
+# floor; the ride cost $0.0685 of its key's $1.00). The prose lines below are the issue's own
+# wording, which any ride reading the issue has in its log.
+BUDGET_SELF_REFERENCE_LOG = (
+    "$ sed -n '268,296p' agent-base/agent-finalize\n"
+    "_BUDGET_ACCOUNT_RE = r\"insufficient (credit|fund)|402 payment|payment required|out of credit\"\n"
+    "_BUDGET_KEY_RE = r\"key limit exceeded\"\n"
+    "_BUDGET_RESIDUAL_RE = r\"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded\"\n"
+    "        _BUDGET_ACCOUNT_RE + \"|\" + _BUDGET_KEY_RE + \"|\" + _BUDGET_RESIDUAL_RE,\n"
+    "\n"
+    "the literal string `402 payment` is on line 268 of the very file the ride was reading\n"
+    "exit_status: budget-403   error_class: budget-exhausted-account   budget_match: \"402 payment\"\n"
+    "| the OpenRouter account is out of credit | credit_usd = 10.3044, floor 0.25 |\n"
+    "| a key limit was hit | no — `_BUDGET_KEY_RE` (`key limit exceeded`) did not match |\n"
+    "a real 402 would be served as payment required, and the previous strike carried insufficient credit\n"
+)
+
 
 def test_import_is_side_effect_free(af):
     """Importing the harness must not run it — see conftest's loader note."""
@@ -121,6 +141,110 @@ class TestFailureSignatures:
     def test_panic_is_harness_death(self, af, logfile):
         s, e = af.classify(logfile("thread 'main' panicked at src/x.rs\n"), {})
         assert (s, e) == ("harness-death", "goose-panic")
+
+
+class TestBudgetSelfReference:
+    """agent-runtime#136: the budget-403 family must not match its own pattern source.
+
+    homelab#1705's class one family over: there, `-32602` in the ride's own summary text was read
+    as the death; here the classifier's pattern constants, quoted in the ride's transcript, were.
+    """
+
+    def test_a_ride_that_read_the_classifier_is_not_a_402(self, af, logfile):
+        """The incident, as a log: source lines + prose about them, and no provider 402."""
+        assert af.failure_signature(BUDGET_SELF_REFERENCE_LOG, harness="goose") is None
+        stats = {"harness": "goose", "pr_url": "http://x/134"}
+        s, e = af.classify(logfile(BUDGET_SELF_REFERENCE_LOG), stats)
+        assert (s, e) == ("clean", "")
+        # …and nothing is carried into the cross-pod conduit (#91) either.
+        assert "budget_match" not in stats
+
+    def test_the_classifier_source_does_not_call_itself_a_budget_death(self, af, af_source):
+        """The strongest form of the pin: the whole file, as the text a reconnaissance ride logs.
+
+        (Other signatures in this file have their own self-reference surface — out of scope for
+        #136, which is the budget family. This asserts the budget class specifically.)
+        """
+        sig = af.failure_signature(af_source, harness="goose")
+        assert sig is None or sig[0] != "budget-403", sig
+
+    def test_prose_naming_the_other_arms_is_not_a_budget_death(self, af):
+        """Acceptance: the key and residual arms get the same treatment. Backticks are markdown —
+        a ride writing ABOUT this class, not a provider message."""
+        prose = ("the key arm matches `key limit exceeded`, the residual arm `quota exceeded`\n"
+                 "and `insufficient quota`; neither matched on this run.\n")
+        assert af.failure_signature(prose, harness="goose") is None
+
+    def test_a_real_provider_402_still_classifies(self, af):
+        """Acceptance: the documented OpenRouter body — the shape the hardening must keep."""
+        body = ('{"error": {"code": 402, "message": "Insufficient credits. '
+                'Add more using https://openrouter.ai/credits"}}\n')
+        assert af.failure_signature(body, harness="goose") == (
+            "budget-403", "budget-exhausted-account")
+
+    def test_a_real_402_envelope_is_anchor_order_independent(self, af):
+        """The envelope's code is an anchor in its own natural key order (#136 review, finding 1).
+
+        `{"code": 402, "message": "Insufficient credits"}` is the documented envelope's shape with
+        the code FIRST, and no top-up URL. A lookahead that only scans forward from the wording
+        sees nothing ahead of it there and lets a genuine account-exhaustion 402 go unclassified —
+        the opposite failure mode from the self-strike this suite pins, still wrong.
+        """
+        for body in ('{"code": 402, "message": "Insufficient credits"}\n',
+                     '{"message": "Insufficient credits", "code": 402}\n'):
+            assert af.failure_signature(body, harness="goose") == (
+                "budget-403", "budget-exhausted-account"), body
+
+    def test_the_fund_wording_still_classifies(self, af):
+        """`insufficient fund(s)` predates #85 and survives the shape gate (#136 review, finding 2).
+
+        Master's account arm matched `insufficient (credit|fund)` unconditionally, so a 402-shaped
+        payload worded with "funds" classified as budget-exhausted-account and must keep doing so:
+        the shape gate narrows WHICH lines count, never which wordings the arm knows.
+        """
+        for body in ('{"code": 402, "message": "Insufficient funds in account"}\n',
+                     '{"code": 402, "message": "Account is out of funds"}\n',
+                     '{"error":{"code":402,"message":"insufficient fund"}}\n'):
+            assert af.failure_signature(body, harness="goose") == (
+                "budget-403", "budget-exhausted-account"), body
+
+    def test_the_reason_phrase_classifies_only_with_402_evidence(self, af):
+        """`payment required` is retained under the shape gate, not beside it (#136 review, finding 3).
+
+        Master's account arm had `payment required` as its own bare alternation branch, so a line
+        carrying only the reason phrase classified as budget-exhausted-account. Restoring that bare
+        branch re-opens this issue verbatim: the phrase is this constant's own alternation branch
+        AND the prose of any issue written about this class — the incident fixture above contains
+        "a real 402 would be served as payment required", with no status code, no envelope and no
+        URL, and a bare branch strikes on it (that is the test that goes red as the proof).
+
+        So the phrase is admitted exactly like every other account wording: gated on the 402 shape
+        on the same line. The 402-shaped renderings classify; the bare reason phrase is inert.
+        """
+        for body in ("HTTP/1.1 402 Payment Required\n",
+                     '{"error":{"code":402,"message":"Payment Required"}}\n',
+                     'Error code: 402 - {"error":{"message":"Payment Required"}}\n'):
+            assert af.failure_signature(body, harness="goose") == (
+                "budget-403", "budget-exhausted-account"), body
+        # No 402 evidence on the line: the reason phrase alone is not a provider response.
+        assert af.failure_signature("Error: Payment Required\n", harness="goose") is None
+
+    def test_the_carry_holds_the_provider_line_not_the_source_line(self, af):
+        """Acceptance: #91's conduit carries a provider response, and carries nothing at all when
+        the only text naming a pattern is the classifier's own source."""
+        stats = {}
+        af._carry_budget_match(BUDGET_SELF_REFERENCE_LOG, stats)
+        assert "budget_match" not in stats, stats["budget_match"]
+        stats = {}
+        af._carry_budget_match(BUDGET_SELF_REFERENCE_LOG + "402 payment required\n", stats)
+        assert stats["budget_match"] == "402 payment required"
+
+    def test_the_budget_death_predicate_still_fires_on_every_arm(self, af):
+        """The three arms keep working on provider wordings — only the source text is inert."""
+        for line, cls in (("402 payment required\n", "budget-exhausted-account"),
+                          ("key limit exceeded\n", "budget-exhausted-key"),
+                          ("quota exceeded\n", "http-403-other")):
+            assert af.failure_signature(line, harness="goose") == ("budget-403", cls)
 
 
 class TestBudgetCarryDrift:

@@ -273,27 +273,93 @@ def _watchdog_class():
 #   Account-credit: the account is out of funds (operator top-up needed).
 #   Per-key-limit: the API key's own cap is hit (mint configuration defect).
 #   Residual: ambiguous between the two owners — does NOT assert budget exhaustion.
-_BUDGET_ACCOUNT_RE = r"insufficient (credit|fund)|402 payment|payment required|out of credit"
+#
+# agent-runtime#136: each of these is a claim about a PROVIDER RESPONSE, so none of them may match
+# this file's own pattern text — the rides most likely to quote this classifier are the rides sent
+# to read it, and round 1 of #134 was exactly that: it read this file, the account pattern's own
+# second branch is the literal `402 payment`, and the classifier struck its model for a 402 the
+# provider never served (the account held $10.30 against a $0.25 floor; the ride cost $0.0685 of a
+# $1.00 key). Two guards, both consumed by failure_signature():
+#   * the account arm matches the provider's 402 SHAPE on the same line as the credit/fund wording
+#     — the status code joined to the reason phrase, the JSON error envelope's code field, or the
+#     top-up URL its message points at — never the bare phrase, which is this constant's own
+#     alternation branch and the prose of any issue written about this class. Both anchors are
+#     lookaheads from the same position, so the code may sit before or after the wording: the
+#     documented envelope puts it first, and a forward-only lookahead silently missed that order
+#     and let a genuine account-exhaustion 402 go unclassified (#136 review). `fund(s)` is
+#     master's wording (it predates #85) and is gated exactly like `credit(s)` — the shape decides
+#     WHICH lines count, never which wordings the arm knows. `payment required` is master's fourth
+#     alternation branch, and it is retained UNDER the same shape gate rather than beside it: a
+#     bare branch re-opens this issue, because the phrase is both this constant's own branch and
+#     the prose of any issue about this class (the incident fixture's "a real 402 would be served
+#     as payment required" has no code, envelope or URL). A reason phrase carrying no 402 evidence
+#     on its line is therefore out of the arm by ruling — a deliberate, pinned narrowing;
+#   * _budget_text() drops the log lines that ARE this file's pattern source (see its docstring).
+# The key and residual arms need no shape gate of their own: their wordings are complete provider
+# messages, never the fragments a ride writing ABOUT this class produces, and the tests pin them as
+# bare lines. They get the same _budget_text() guard — which is what makes the source lines that
+# define them inert, and what covers the backtick-quoted prose that names them.
+_BUDGET_ACCOUNT_SHAPE_RE = (
+    r"[\"']?code[\"']?\s*[:=]\s*402\b"
+    r"|openrouter\.ai/(?:settings/)?credits"
+)
+_BUDGET_ACCOUNT_PHRASE_RE = (r"insufficient (?:credits?|funds?)|out of (?:credits?|funds?)"
+                             r"|payment required")
+_BUDGET_ACCOUNT_RE = (
+    r"\b402\b[^\w|]{0,3}payment required"
+    r"|(?=[^\n]*(?:" + _BUDGET_ACCOUNT_SHAPE_RE + r"))"
+    r"[^\n]*?(?:" + _BUDGET_ACCOUNT_PHRASE_RE + r")"
+)
 _BUDGET_KEY_RE = r"key limit exceeded"
 _BUDGET_RESIDUAL_RE = r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
+# The three joined, defined once for the two consumers that want "any budget arm": the carry (#91)
+# and the source guard below.
+_BUDGET_ALL_RE = _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESIDUAL_RE
+
+# This file's own pattern source, recognised so the budget family cannot match it (#136). Three
+# shapes, each pattern text rather than a provider message: a line naming one of the constants above
+# (their definitions, or the join in _carry_budget_match), a line quoting a regex alternation (a
+# quoted `a|b`), and a line backtick-quoting any budget phrase — backticks are markdown, i.e. prose
+# ABOUT the pattern, while a real provider's wording arrives inside a JSON message field.
+_BUDGET_SOURCE_RE = re.compile(
+    r"_BUDGET_\w+_RE\b"
+    r"|[`\"'][^`\"'\n]*\|[^`\"'\n]*[`\"']"
+    r"|`[^`\n]*(?:" + _BUDGET_ALL_RE + r")[^`\n]*`"
+)
+
+
+def _budget_text(text):
+    """The text the budget-403 family may match: this file's own pattern source removed (#136).
+
+    A run log is the ride's transcript, and a ride sent to work on this classifier reads this file
+    — so the constants above arrive in the log as text, and each constant's own line contains its
+    own wording literally, which is enough for that arm to match the file against itself. The
+    incident shows only the account arm because it is tested first and returns; the other two
+    self-match in exactly the same way. A line naming a constant, quoting an alternation, or
+    backtick-quoting a phrase is pattern text, not a provider response, so it cannot be evidence of
+    a budget death. Removing the LINES (not just the phrases) is what keeps the two consumers of the
+    patterns agreeing — #91's contract — so the line _carry_budget_match() carries is the
+    provider's, never a matched source line.
+    """
+    return "\n".join(l for l in text.splitlines() if not _BUDGET_SOURCE_RE.search(l))
 
 
 def _carry_budget_match(text, stats):
-    """Find the first line matching any budget-403 pattern and carry it into stats.
+    """Carry the first budget-403 log LINE that is a provider response into stats.
 
     The AGENT_RUN_STATS line is the only cross-pod conduit; the matched line lets the
     discriminator survive the pod (homelab#879's third deliverable, #85).
 
     Consumes the three shared sub-patterns (_BUDGET_ACCOUNT_RE, _BUDGET_KEY_RE,
-    _BUDGET_RESIDUAL_RE) so the carry stays in sync with failure_signature() (#91).
+    _BUDGET_RESIDUAL_RE) through _BUDGET_ALL_RE so the carry stays in sync with
+    failure_signature() (#91), and consumes _budget_text() for the same reason in the other
+    direction (#136): what is carried must be the provider's line, not this file's pattern source.
     """
-    _budget_all = re.compile(
-        _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESIDUAL_RE,
-        re.IGNORECASE | re.MULTILINE,
-    )
-    m = _budget_all.search(text)
-    if m:
-        stats["budget_match"] = m.group(0).strip()
+    _budget_all = re.compile(_BUDGET_ALL_RE, re.IGNORECASE | re.MULTILINE)
+    for line in _budget_text(text).splitlines():
+        if _budget_all.search(line):
+            stats["budget_match"] = line.strip()[:200]
+            return
 
 
 def _check_stale_evidence(stats):
@@ -443,10 +509,12 @@ def failure_signature(text, ci_passed=None, watchdog="", harness=""):
 
     Budget-403 is split into three sub-classes (#85): account-credit (budget-exhausted-account),
     per-key-limit (budget-exhausted-key), and residual (http-403-other). The patterns are defined
-    once in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91).
+    once in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91), and are
+    matched against _budget_text() — the log with this file's own pattern source removed — so a
+    ride that read this classifier cannot strike its own model with it (#136).
     """
-    def n(pat):
-        return len(re.findall(pat, text, re.IGNORECASE | re.MULTILINE))
+    def n(pat, txt=None):
+        return len(re.findall(pat, text if txt is None else txt, re.IGNORECASE | re.MULTILINE))
 
     # Line-precise signatures (measured against the first oracle-fleet runs, 2026-07-09).
     # git-auth is GIT/GH-specific (a dead ~1h App token at push/PR time), distinct from the LLM-key
@@ -462,9 +530,11 @@ def failure_signature(text, ci_passed=None, watchdog="", harness=""):
     # Split into three sub-classes (#85). exit_status stays budget-403 for all three;
     # the discriminator is in error_class only (agent-runtime#61 + homelab's allow-list).
     # Patterns live in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91).
-    budget_account = n(_BUDGET_ACCOUNT_RE)
-    budget_key = n(_BUDGET_KEY_RE)
-    budget_residual = n(_BUDGET_RESIDUAL_RE)
+    # #136: counted over _budget_text(), so the constants' own source lines in the log are inert.
+    budget_text = _budget_text(text)
+    budget_account = n(_BUDGET_ACCOUNT_RE, budget_text)
+    budget_key = n(_BUDGET_KEY_RE, budget_text)
+    budget_residual = n(_BUDGET_RESIDUAL_RE, budget_text)
     # homelab#1069 / agent-runtime#99: a rate-limited `gh issue view` (the round's directive
     # channel) means the round could not read its arbitration comment. Distinct class so the
     # infra failure is never counted as a completed round. Outranks truncation/auth-storm
