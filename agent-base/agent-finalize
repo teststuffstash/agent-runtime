@@ -289,10 +289,23 @@ def _watchdog_class():
 # messages, never the fragments a ride writing ABOUT this class produces, and the tests pin them as
 # bare lines. They get the same _budget_text() guard — which is what makes the source lines that
 # define them inert, and what covers the backtick-quoted prose that names them.
+# The account arm matches the provider's 402 SHAPE on the same line as the credit/fund wording:
+# the status line, the JSON error envelope's code field, or the top-up URL its message points at.
+# The bare wording alone is this constant's own alternation branch and the prose of any issue
+# written about this class (#136), so it is never enough by itself. Both anchors are lookaheads
+# from the same position, so the code may sit before or after the wording — the documented
+# envelope puts it first, and a forward-only lookahead silently missed that order (#136 review).
+_BUDGET_ACCOUNT_SHAPE_RE = (
+    r"[\"']?code[\"']?\s*[:=]\s*402\b"
+    r"|openrouter\.ai/(?:settings/)?credits"
+)
+# `fund(s)` is master's wording (it predates #85) and is gated exactly like `credit(s)`: the shape
+# decides WHICH lines count, never which wordings the arm knows (#136 review).
+_BUDGET_ACCOUNT_PHRASE_RE = r"insufficient (?:credits?|funds?)|out of (?:credits?|funds?)"
 _BUDGET_ACCOUNT_RE = (
     r"\b402\b[^\w|]{0,3}payment required"
-    r"|(?=[^\n]*(?:[\"']?code[\"']?\s*[:=]\s*402\b|openrouter\.ai/(?:settings/)?credits))"
-    r"(?:insufficient credits?|out of credits?)"
+    r"|(?=[^\n]*(?:" + _BUDGET_ACCOUNT_SHAPE_RE + r"))"
+    r"[^\n]*?(?:" + _BUDGET_ACCOUNT_PHRASE_RE + r")"
 )
 _BUDGET_KEY_RE = r"key limit exceeded"
 _BUDGET_RESIDUAL_RE = r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
