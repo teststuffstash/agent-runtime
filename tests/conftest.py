@@ -60,7 +60,7 @@ def logfile(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch, tmp_path):
+def _clean_env(monkeypatch, tmp_path, af):
     """classify() reads HARNESS_EXIT, AGENT_TASK and the watchdog marker from the environment;
     the resumable-branch answer (#33) reads WORK_BRANCH.
 
@@ -79,3 +79,7 @@ def _clean_env(monkeypatch, tmp_path):
     # entrypoint has already written /tmp/agent-phase-marks for the real ride. A test reading the
     # default path would then assert against another run's clone time.
     monkeypatch.setenv("AGENT_PHASE_MARKS", str(tmp_path / "no-such-phase-marks"))
+    # #140: classify()/salvage_push() read the ride's own diff from git to exclude it from the
+    # budget family. Tests must not read the ambient repo's diff, so the seam is stubbed empty
+    # here; the tests that exercise the exclusion monkeypatch it (or pass `ride_diff=`) themselves.
+    monkeypatch.setattr(af, "_ride_diff_text", lambda: "")

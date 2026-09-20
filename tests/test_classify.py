@@ -247,6 +247,76 @@ class TestBudgetSelfReference:
             assert af.failure_signature(line, harness="goose") == ("budget-403", cls)
 
 
+class TestRideDiffIsNotEvidence:
+    """agent-runtime#140: a strike class is never derived from a token that appears only inside the
+    ride's own diff.
+
+    #136 closed the self-reference hole for THIS file's source shapes (a `_BUDGET_*_RE` token, a
+    quoted alternation, a backtick-quoted phrase). The same classes are documented in homelab's
+    launcher as BARE `#` comments, which none of those shapes match — so a ride editing
+    `agents/agent-session.sh` logged `#   - budget-403-key:   key limit exceeded`, `_BUDGET_KEY_RE`
+    matched, and a $0.0629 run against a live $1 key was classified `budget-exhausted-key`
+    (homelab#1780 r1, 2026-09-19). The defence is structural: a line the ride's own diff carries is
+    the ride's text, so it cannot be evidence of a provider death.
+    """
+
+    # homelab `agents/agent-session.sh` @ d5f6d85, verbatim: bare `#` comments, no backticks, no
+    # `_BUDGET_*_RE` token on the line — the shapes the #136 guard does not strip.
+    LAUNCHER_KEY_COMMENT = "#   - budget-403-key:   key limit exceeded\n"
+    LAUNCHER_EXHAUSTED_COMMENT = "#   - budget-exhausted-key: the per-key cap\n"
+
+    def _diff(self, *added):
+        return ("diff --git a/agents/agent-session.sh b/agents/agent-session.sh\n"
+                "--- a/agents/agent-session.sh\n"
+                "+++ b/agents/agent-session.sh\n"
+                "@@ -1,3 +1,5 @@\n"
+                + "".join("+" + l for l in added))
+
+    def test_a_ride_editing_the_launcher_is_not_a_key_death(self, af, logfile, monkeypatch):
+        """The incident, as a log + the diff that authored it: the run classifies clean."""
+        log = ("$ sed -n '1,40p' agents/agent-session.sh\n"
+               + self.LAUNCHER_KEY_COMMENT
+               + self.LAUNCHER_EXHAUSTED_COMMENT)
+        diff = self._diff(self.LAUNCHER_KEY_COMMENT, self.LAUNCHER_EXHAUSTED_COMMENT)
+        assert af.failure_signature(log, harness="goose", ride_diff=diff) is None
+        monkeypatch.setattr(af, "_ride_diff_text", lambda: diff)
+        # The no-op detector reads the pod's PRE_LOOP_HEAD snapshot (an artifact of running the
+        # suite inside a ride); pin it off so this test is about the budget family only.
+        monkeypatch.setattr(af, "_is_no_op_round", lambda _s: False)
+        stats = {"harness": "goose", "pr_url": "http://x/140"}
+        s, e = af.classify(logfile(log), stats)
+        assert (s, e) == ("clean", "")
+        # …and nothing is carried into the cross-pod conduit (#91) either.
+        assert "budget_match" not in stats
+
+    def test_the_carry_holds_no_line_the_ride_authored(self, af):
+        """#91's conduit must not carry the ride's own diff line as a provider response."""
+        stats = {}
+        af._carry_budget_match(self.LAUNCHER_KEY_COMMENT, stats,
+                               self._diff(self.LAUNCHER_KEY_COMMENT))
+        assert "budget_match" not in stats, stats.get("budget_match")
+
+    def test_a_provider_key_line_outside_the_diff_still_classifies(self, af):
+        """The exclusion is per-line: a genuine provider wording the ride did NOT author still
+        classifies — the fix must not blind the classifier to a real key death."""
+        assert af.failure_signature("key limit exceeded\n", harness="goose",
+                                    ride_diff=self._diff("unrelated launcher edit\n")) == (
+            "budget-403", "budget-exhausted-key")
+
+    def test_the_diff_exclusion_covers_every_budget_arm(self, af):
+        """Structural, not key-specific: any budget wording the ride authored is inert."""
+        for line in ("402 payment required\n", "key limit exceeded\n", "quota exceeded\n"):
+            assert af.failure_signature(line, harness="goose",
+                                        ride_diff=self._diff(line)) is None, line
+
+    def test_no_diff_available_leaves_the_136_guard_alone(self, af):
+        """`ride_diff=""` (git unreadable) must not change today's behaviour: the #136 source
+        guard still applies and a bare provider line still classifies."""
+        assert af.failure_signature("key limit exceeded\n", harness="goose") == (
+            "budget-403", "budget-exhausted-key")
+        assert af.failure_signature(BUDGET_SELF_REFERENCE_LOG, harness="goose") is None
+
+
 class TestBudgetCarryDrift:
     """#91: every budget-403 sub-class must be carried into stats['budget_match'].
 
