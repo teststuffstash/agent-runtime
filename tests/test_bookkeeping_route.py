@@ -242,6 +242,43 @@ class TestBookkeepingWiring:
             "AGENT_STRIKE: model=some/model error_class=goose-panic "
             "round=3 session=pod-5")
 
+    def test_key_class_emits_key_retry_not_a_strike(self, af, monkeypatch, logfile):
+        """FU-202/#140: a key-class failure is a MINT defect, not a model strike — the in-pod path
+        posts `KEY-RETRY:` so the coordinator's chain-walk (which greps `AGENT_STRIKE:`) does not
+        strike a healthy model off the chain. homelab#1780 r1 posted an `AGENT_STRIKE: …
+        error_class=budget-exhausted-key` and no `KEY-RETRY:` anywhere."""
+        stats = {"pr_url": "http://x/1", "exit_status": "budget-403",
+                 "error_class": "budget-exhausted-key", "pod": "pod-7",
+                 "budget_match": "key limit exceeded"}
+        calls = self._run(af, monkeypatch, logfile("key limit exceeded\n"), stats)
+        posted = self._find(calls, "issue", "comment")
+        assert len(posted) == 1
+        first = posted[0][-1].splitlines()[0]
+        assert first == ("KEY-RETRY: model=some/model error_class=budget-exhausted-key "
+                         "round=3 session=pod-7 match=key limit exceeded")
+        assert not first.startswith("AGENT_STRIKE:")
+        assert stats.get("strike_by_pod") is True
+
+    def test_both_key_classes_take_the_key_retry_channel(self, af, monkeypatch):
+        """The two classes FU-202 names — `budget-403-key` and `budget-exhausted-key` — and only
+        those. `budget-403` (residual) takes neither channel; it escalates."""
+        monkeypatch.setenv("MODEL", "m/x")
+        monkeypatch.setenv("AGENT_ROUND", "2")
+        for cls in ("budget-403-key", "budget-exhausted-key"):
+            line = af.strike_marker({"exit_status": "budget-403", "error_class": cls, "pod": "p"})
+            assert line.startswith("KEY-RETRY: "), (cls, line)
+            assert "error_class=%s" % cls in line
+        assert af.strike_marker({"exit_status": "budget-403", "error_class": "http-403-other",
+                                 "pod": "p"}).startswith("AGENT_STRIKE: ")
+
+    def test_key_retry_omits_match_when_absent(self, af, monkeypatch):
+        """The launcher appends ` match=` only when the classifier captured a line — same here."""
+        monkeypatch.setenv("MODEL", "m/x")
+        monkeypatch.setenv("AGENT_ROUND", "2")
+        line = af.strike_marker({"exit_status": "budget-403", "error_class": "budget-403-key",
+                                 "pod": "p"})
+        assert line == "KEY-RETRY: model=m/x error_class=budget-403-key round=2 session=p"
+
     def test_a_died_round_still_guarantees_the_issue_link(self, af, monkeypatch, logfile):
         """#32 holds on both legs: the artifact is real either way, and an unlinked PR gets the
         issue re-dispatched onto finished work."""

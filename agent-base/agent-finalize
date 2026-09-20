@@ -328,8 +328,48 @@ _BUDGET_SOURCE_RE = re.compile(
 )
 
 
-def _budget_text(text):
-    """The text the budget-403 family may match: this file's own pattern source removed (#136).
+def _diff_authored_lines(diff_text):
+    """The content lines of a unified diff, normalized: the leading +/-/space marker removed and
+    surrounding whitespace stripped. A line the ride's own diff carries is the ride's own text (or
+    the file it is editing), never a provider response (#140)."""
+    out = set()
+    for line in diff_text.splitlines():
+        if line.startswith(("+++", "---", "@@", "diff ", "index ")):
+            continue
+        if line[:1] in ("+", "-", " "):
+            line = line[1:]
+        line = line.strip()
+        if line:
+            out.add(line)
+    return out
+
+
+def _ride_diff_text():
+    """The ride's own diff as text, or "" when it cannot be read (#140).
+
+    A run log is the ride's transcript: it holds whatever the ride READ and whatever it WROTE, and
+    the two are indistinguishable in the text alone. The diff is the authoritative record of what
+    the ride authored, so a budget-class wording that appears only there is the ride's own text,
+    not a provider response. Best-effort: any git failure returns "" (the #136 source guard still
+    applies), never fatal.
+    """
+    wd = os.environ.get("WORKDIR", "/work/repo")
+    base = os.environ.get("BASE_REF", "master")
+    if not os.path.isdir(os.path.join(wd, ".git")):
+        return ""
+    try:
+        r = subprocess.run(["git", "-C", wd, "diff", "origin/%s" % base],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return ""
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def _budget_text(text, ride_diff=""):
+    """The text the budget-403 family may match: this file's own pattern source (#136) and the
+    ride's own diff (#140) removed.
 
     A run log is the ride's transcript, and a ride sent to work on this classifier reads this file
     — so the constants above arrive in the log as text, and each constant's own line contains its
@@ -340,11 +380,23 @@ def _budget_text(text):
     a budget death. Removing the LINES (not just the phrases) is what keeps the two consumers of the
     patterns agreeing — #91's contract — so the line _carry_budget_match() carries is the
     provider's, never a matched source line.
+
+    #140: the #136 guard recognises only THIS file's source shapes, so the same classes documented
+    in another repo's bare `#` comments still matched — a ride editing homelab's
+    `agents/agent-session.sh` logged `#   - budget-403-key:   key limit exceeded`, `_BUDGET_KEY_RE`
+    matched, and a $0.0629 run against a live $1 key was classified `budget-exhausted-key`. The
+    defence is structural, not another strip pattern: a line the ride's own diff carries is the
+    ride's text, so it cannot be evidence of a provider death. `ride_diff` is the ride's diff text
+    (see `_ride_diff_text`); empty means "no diff available", which leaves the #136 guard alone.
     """
-    return "\n".join(l for l in text.splitlines() if not _BUDGET_SOURCE_RE.search(l))
+    authored = _diff_authored_lines(ride_diff) if ride_diff else set()
+    return "\n".join(
+        l for l in text.splitlines()
+        if not _BUDGET_SOURCE_RE.search(l) and l.strip() not in authored
+    )
 
 
-def _carry_budget_match(text, stats):
+def _carry_budget_match(text, stats, ride_diff=""):
     """Carry the first budget-403 log LINE that is a provider response into stats.
 
     The AGENT_RUN_STATS line is the only cross-pod conduit; the matched line lets the
@@ -353,10 +405,11 @@ def _carry_budget_match(text, stats):
     Consumes the three shared sub-patterns (_BUDGET_ACCOUNT_RE, _BUDGET_KEY_RE,
     _BUDGET_RESIDUAL_RE) through _BUDGET_ALL_RE so the carry stays in sync with
     failure_signature() (#91), and consumes _budget_text() for the same reason in the other
-    direction (#136): what is carried must be the provider's line, not this file's pattern source.
+    direction (#136/#140): what is carried must be the provider's line, not this file's pattern
+    source and not a line the ride's own diff authored.
     """
     _budget_all = re.compile(_BUDGET_ALL_RE, re.IGNORECASE | re.MULTILINE)
-    for line in _budget_text(text).splitlines():
+    for line in _budget_text(text, ride_diff).splitlines():
         if _budget_all.search(line):
             stats["budget_match"] = line.strip()[:200]
             return
@@ -492,7 +545,7 @@ def _is_no_op_round(stats):
         return False
 
 
-def failure_signature(text, ci_passed=None, watchdog="", harness=""):
+def failure_signature(text, ci_passed=None, watchdog="", harness="", ride_diff=""):
     """The dominant machine-detectable failure in a run log → (exit_status, error_class), or None.
 
     Pure over the log text so the precedence is testable, and shared: `classify` and
@@ -511,7 +564,9 @@ def failure_signature(text, ci_passed=None, watchdog="", harness=""):
     per-key-limit (budget-exhausted-key), and residual (http-403-other). The patterns are defined
     once in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91), and are
     matched against _budget_text() — the log with this file's own pattern source removed — so a
-    ride that read this classifier cannot strike its own model with it (#136).
+    ride that read this classifier cannot strike its own model with it (#136). `ride_diff` is the
+    ride's own diff text (#140): a budget wording that appears only there is the ride's own text,
+    not a provider response, so it cannot mint a class either.
     """
     def n(pat, txt=None):
         return len(re.findall(pat, text if txt is None else txt, re.IGNORECASE | re.MULTILINE))
@@ -530,8 +585,9 @@ def failure_signature(text, ci_passed=None, watchdog="", harness=""):
     # Split into three sub-classes (#85). exit_status stays budget-403 for all three;
     # the discriminator is in error_class only (agent-runtime#61 + homelab's allow-list).
     # Patterns live in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91).
-    # #136: counted over _budget_text(), so the constants' own source lines in the log are inert.
-    budget_text = _budget_text(text)
+    # #136/#140: counted over _budget_text(), so the constants' own source lines in the log are
+    # inert, and so is any line the ride's own diff authored.
+    budget_text = _budget_text(text, ride_diff)
     budget_account = n(_BUDGET_ACCOUNT_RE, budget_text)
     budget_key = n(_BUDGET_KEY_RE, budget_text)
     budget_residual = n(_BUDGET_RESIDUAL_RE, budget_text)
@@ -679,13 +735,18 @@ def classify(log_path, stats):
     # `clean` and poison the model-health pivot with a success that shipped nothing (oracle-fleet#1
     # attempt 1). Those runs are `no-artifact` now.
     succeeded = bool(stats.get("pr_url"))
-    fail = failure_signature(text, ci_passed, _watchdog_class(), stats.get("harness", ""))
+    # #140: the ride's own diff is the authoritative record of what it WROTE — a budget-class
+    # wording that appears only there is the ride's text, not a provider response. Read once and
+    # handed to both consumers so the signature and the carry cannot disagree (#91's contract).
+    ride_diff = _ride_diff_text()
+    fail = failure_signature(text, ci_passed, _watchdog_class(), stats.get("harness", ""),
+                             ride_diff)
 
     # #85/#91: carry the matched budget log line into stats so the discriminator survives the pod
     # (homelab#879's third deliverable). The three sub-classes (account-credit, per-key-limit,
     # residual) are all carried — the AGENT_RUN_STATS line is the only cross-pod conduit.
     if fail and fail[0] == "budget-403":
-        _carry_budget_match(text, stats)
+        _carry_budget_match(text, stats, ride_diff)
 
     # #36: a DEATH outranks the artifact. `succeeded` used to short-circuit here, before `fail` was
     # consulted at all — and since a fix round always has a PR (that is what a fix round is), from
@@ -810,7 +871,7 @@ def salvage_push(stats, log_path=""):
     "there is nothing to resume"."""
     if stats.get("pr_url") and not died_this_round(
             failure_signature(_log_text(log_path), stats.get("ci_passed"), _watchdog_class(),
-                              stats.get("harness", "")),
+                              stats.get("harness", ""), _ride_diff_text()),
             stats):
         return
     wd, base, branch = _resolve_branch()
@@ -1501,6 +1562,51 @@ def flip_issue_to_review(gh, slug, pr_url):
           flush=True)
 
 
+# FU-202: the key-class failures are MINT defects, not model strikes — the re-dispatch uses the
+# SAME model with a fresh key. They post a `KEY-RETRY:` marker instead of `AGENT_STRIKE:`, so the
+# coordinator's chain-walk (which greps `AGENT_STRIKE:` and takes the first chain entry not yet
+# struck) does not strike a healthy model off the chain for a key that needs re-minting. The
+# launcher's terminal block carries the same split, but it is dead code behind
+# `STRIKE_BY_POD != true` — always true in production since terminal bookkeeping moved in-pod
+# (FU-064/FU-043) — so this is the path that runs (#140).
+KEY_RETRY_CLASSES = ("budget-403-key", "budget-exhausted-key")
+
+
+def strike_marker(stats):
+    """The FIRST LINE of the terminal comment: `AGENT_STRIKE:` for a model strike, `KEY-RETRY:`
+    for a key-class failure (FU-202, #140).
+
+    The coordinator's chain-walk greps `AGENT_STRIKE:` and takes the first chain entry not yet
+    struck; it SKIPS `KEY-RETRY:` because a key-class failure is a mint defect — the re-dispatch
+    uses the same model with a fresh key. Emitting the key classes on the strike channel would
+    strike a healthy model off the chain (homelab#1780 r1: `AGENT_STRIKE: … error_class=
+    budget-exhausted-key`, no `KEY-RETRY:` anywhere).
+
+    Grammar is the launcher's, byte-for-byte (homelab `agents/agent-session.sh` @ d5f6d85):
+    `KEY-RETRY: model=<m> error_class=<c> round=<r> session=<s>` with an optional trailing
+    ` match=<budget_match>` when the quota/budget classifier captured a line. The strike grammar
+    is unchanged: `AGENT_STRIKE: model=… error_class=… round=… session=…` plus the optional
+    ` provider=…` (#127). `budget-403` (residual) takes neither channel — it escalates.
+    """
+    err = stats.get("error_class") or "unknown"
+    if stats.get("exit_status") in ("failed", "ci-failed"):
+        err = "unknown"
+    model = os.environ.get("MODEL") or stats.get("model", "?")
+    round_ = os.environ.get("AGENT_ROUND", "1")
+    session = stats.get("pod", "?")
+    if err in KEY_RETRY_CLASSES:
+        line = "KEY-RETRY: model=%s error_class=%s round=%s session=%s" % (
+            model, err, round_, session)
+        if stats.get("budget_match"):
+            line += " match=%s" % stats["budget_match"]
+        return line
+    line = "AGENT_STRIKE: model=%s error_class=%s round=%s session=%s" % (
+        model, err, round_, session)
+    if stats.get("provider"):
+        line += " provider=%s" % stats["provider"]
+    return line
+
+
 def bookkeeping(stats, log_path):
     """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR from a round that ENDED — arm
     auto-merge (an un-armed PR is invisible to the ENTIRE merge path: updater, review reflex,
@@ -1691,15 +1797,10 @@ def bookkeeping(stats, log_path):
                           "posts a strike instead)" % posted.stderr.strip()[-200:],
                           file=sys.stderr)
                 return
-            err = stats.get("error_class") or "unknown"
-            if stats.get("exit_status") in ("failed", "ci-failed"):
-                err = "unknown"
-            strike = "AGENT_STRIKE: model=%s error_class=%s round=%s session=%s" % (
-                os.environ.get("MODEL") or stats.get("model", "?"), err,
-                os.environ.get("AGENT_ROUND", "1"), stats.get("pod", "?"),
-            )
-            if stats.get("provider"):
-                strike += " provider=%s" % stats["provider"]
+            # FU-202/#140: the key classes take the KEY-RETRY: channel, every other class the
+            # AGENT_STRIKE: one — the split lives in strike_marker() so the grammar is pinned in
+            # one place. The rest of the body (salvage note + log tail) is unchanged.
+            strike = strike_marker(stats)
             # Issue-scoped, not round-scoped (#33): the coordinator reads this to decide whether to
             # re-dispatch with --work-branch, so a resumed round that committed nothing must still
             # name the branch it resumed.
