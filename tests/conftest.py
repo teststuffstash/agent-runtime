@@ -79,6 +79,12 @@ def _clean_env(monkeypatch, tmp_path, af):
     # entrypoint has already written /tmp/agent-phase-marks for the real ride. A test reading the
     # default path would then assert against another run's clone time.
     monkeypatch.setenv("AGENT_PHASE_MARKS", str(tmp_path / "no-such-phase-marks"))
+    # …and for the no-op detector (#134): it reads the pod's PRE_LOOP_HEAD snapshot, which the
+    # entrypoint's `--snapshot` wrote for the REAL ride. Left ambient, every test that reports a
+    # pr_url compares the ride's pre-loop HEAD against the checkout's HEAD — equal, because the
+    # suite runs before the ride commits — and reads `no-op` instead of `clean`. The tests that
+    # exercise the detector opt in by monkeypatching PRE_LOOP_HEAD themselves.
+    monkeypatch.setattr(af, "PRE_LOOP_HEAD", str(tmp_path / "no-such-pre-loop-head"))
     # #140: classify()/salvage_push() read the ride's own diff from git to exclude it from the
     # budget family. Tests must not read the ambient repo's diff, so the seam is stubbed empty
     # here; the tests that exercise the exclusion monkeypatch it (or pass `ride_diff=`) themselves.

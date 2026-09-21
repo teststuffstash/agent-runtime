@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # agent-base — the homelab agent platform's harness image (ADR-077/078, docs/agents/).
 #
-# Bundles the *harnesses* (goose + opencode + claude-code, homelab FU-066) plus the *common* project toolchain that recurs across
+# Bundles the *harnesses* (goose + opencode + claude-code + codex, homelab FU-066 / agent-runtime#146) plus the *common* project toolchain that recurs across
 # the agent-target repos (python/uv/kubectl/gitleaks) on a devbox/nix base. The cloned repo's own
 # devbox.json stays AUTHORITATIVE and still runs at startup (boot-from-git) — baking here is purely a
 # /nix-store cache-warm: it realises the shared closure at build time so the runtime `devbox install`
@@ -43,7 +43,8 @@ USER root
 COPY agent-base/entrypoint.sh /usr/local/bin/agent-entrypoint
 COPY agent-base/agent-finalize /usr/local/bin/agent-finalize
 COPY agent-base/agent-storm-watchdog /usr/local/bin/agent-storm-watchdog
-RUN chmod +x /usr/local/bin/agent-entrypoint /usr/local/bin/agent-finalize /usr/local/bin/agent-storm-watchdog
+COPY agent-base/agent-codex /usr/local/bin/agent-codex
+RUN chmod +x /usr/local/bin/agent-entrypoint /usr/local/bin/agent-finalize /usr/local/bin/agent-storm-watchdog /usr/local/bin/agent-codex
 # Login shells (bash -l) re-read /etc/profile and would drop the harness bin from PATH; re-add it so
 # interactive sessions and recipes find goose/opencode regardless of shell type.
 RUN printf 'export PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH\n' > /etc/profile.d/agent-path.sh
