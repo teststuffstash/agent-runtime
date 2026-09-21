@@ -14,7 +14,8 @@
     "kubectl@latest",
     "python@3.11",
     "uv@latest",
-    "claude-code@latest"
+    "claude-code@latest",
+    "codex@latest"
   ],
   "shell": {
     "init_hook": [],
