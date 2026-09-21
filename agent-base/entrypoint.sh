@@ -32,9 +32,19 @@ if [ -n "${GIT_CRED_BROKER_URL:-}" ]; then
 # Bearer; the proxy TokenReviews it. Absent token (older pods, docker mode) stays legal until
 # the proxy sets GIT_TOKEN_REQUIRE_AUTH=1.
 SA=\$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)
-curl -fsS --max-time 10 \${SA:+-H "Authorization: Bearer \$SA"} '$GIT_CRED_BROKER_URL' 2>/dev/null \
-  || cat '$GIT_TOKEN_FILE' 2>/dev/null \
-  || printf %s "\${GH_TOKEN:-}"
+# RETRY across a proxy roll (homelab#1845 aftermath, 2026-09-21): the broker is the single-replica
+# Recreate openrouter-proxy, down ~30 s on every roll (every router PR merge rolls it). One 10 s
+# try at ride start meant oracle-fleet#679-r2 cloned at 16:59:04Z — mid-roll — with an EMPTY
+# password and died "Invalid username or token". 8 tries × (≤10 s + 5 s) spans a roll plus a
+# Multi-Attach wait. --retry-all-errors because a dead Service is connection-refused/timeout,
+# which plain --retry does not count.
+T=\$(curl -fsS --max-time 10 --retry 8 --retry-delay 5 --retry-all-errors \
+      \${SA:+-H "Authorization: Bearer \$SA"} '$GIT_CRED_BROKER_URL' 2>/dev/null) \
+  || T=\$(cat '$GIT_TOKEN_FILE' 2>/dev/null) \
+  || T="\${GH_TOKEN:-}"
+# Never hand git an empty password silently: GitHub's "Invalid username or token" names nothing.
+[ -n "\$T" ] || echo "agent-git-token: NO TOKEN — broker $GIT_CRED_BROKER_URL unreachable after retries, no file, no GH_TOKEN" >&2
+printf %s "\$T"
 TOKENFETCH
   chmod +x "$HOME/bin/agent-git-token"
   cat > "$HOME/bin/git-cred-helper" <<'CREDHELPER'
