@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# agent-codex — the headless Codex invocation seam (agent-runtime#146, slice 2 of the Codex
+# subscription-rail spike).
+#
+# The launcher owns the COMMAND (`codex exec --json <prompt>`); this seam owns the CONTRACT around
+# it, so every Codex ride looks the same to the rest of the platform:
+#
+#   • run in the prepared $WORKDIR — never the caller's cwd (the repo is cloned there);
+#   • invoke `codex exec --json` so the transcript is JSONL, one event per line;
+#   • tee stdout+stderr into $RUN_LOG (default /tmp/run.log) — the file agent-finalize reads for
+#     classify()/parse_outcome();
+#   • exit with Codex's OWN status, unchanged (a nonzero Codex must not be masked by tee).
+#
+# Config is USER-LEVEL and runtime-supplied: Codex reads $CODEX_HOME/config.toml (default
+# ~/.codex). The image bakes NO auth.json — a custom `model_providers.<id>` with command-backed
+# bearer auth (`auth.command`/`args`/`cwd`/`timeout_ms`/`refresh_interval_ms`) is the launcher's
+# config, not the image's. This seam only points Codex at that home; it never writes a credential.
+set -uo pipefail
+
+WORKDIR="${WORKDIR:-/work/repo}"
+RUN_LOG="${RUN_LOG:-/tmp/run.log}"
+CODEX_BIN="${CODEX_BIN:-codex}"
+# Honor a launcher-supplied CODEX_HOME; default to Codex's own ~/.codex. Exported so the child
+# process resolves the same user-level config the launcher mounted.
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+export CODEX_HOME
+
+cd "$WORKDIR" || exit 1
+mkdir -p "$(dirname "$RUN_LOG")"
+
+# `exec --json` is the deterministic headless contract; the launcher supplies the prompt and any
+# extra flags. PIPESTATUS[0] is Codex's status — tee's is deliberately ignored.
+"$CODEX_BIN" exec --json "$@" 2>&1 | tee -a "$RUN_LOG"
+exit "${PIPESTATUS[0]}"

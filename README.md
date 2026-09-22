@@ -15,9 +15,9 @@ builds**. Same Tier-A pattern as the app repos (sleep-tracking, snore-recorder) 
 
 ## `agent-base`
 
-`FROM jetpackio/devbox` + the **harnesses** pinned via devbox/nix: **goose-cli + opencode** (plus
-the basic shell tools agents reach for so they don't fall back to writing Python: gh, git, ripgrep,
-curl, wget, jq). It deliberately bakes **no project toolchain** — the per-project
+`FROM jetpackio/devbox` + the **harnesses** pinned via devbox/nix: **goose-cli + opencode +
+claude-code + codex** (plus the basic shell tools agents reach for so they don't fall back to
+writing Python: gh, git, ripgrep, curl, wget, jq). It deliberately bakes **no project toolchain** — the per-project
 python/uv/pytest/… is materialized at runtime from the cloned repo's own `devbox.json`
 (boot-from-git), so the image stays lean and project-agnostic. One image, two launch modes (the
 launcher lives in homelab as `agents/agent-session.sh`):
@@ -27,6 +27,31 @@ launcher lives in homelab as `agents/agent-session.sh`):
 
 The only seam in/out is **git** (clone at base ref → branch → push) — the contract borrowed from
 Daytona's opencode-plugin, on a self-hosted, ephemeral k8s pod instead of hosted persistent sandboxes.
+
+### The Codex headless seam
+
+`codex` is the fourth harness (agent-runtime#146). The launcher owns the command; the image owns the
+contract, via `agent-codex`:
+
+```sh
+agent-codex "<prompt>"        # → codex exec --json "<prompt>"
+```
+
+- runs in the prepared `$WORKDIR` (never the caller's cwd);
+- invokes `codex exec --json`, so the transcript is JSONL, one event per line;
+- tees stdout+stderr into `$RUN_LOG` (default `/tmp/run.log`) — the file `agent-finalize` reads;
+- exits with Codex's own status, unchanged.
+
+`agent-finalize` decodes that JSONL: `parse_outcome()` reads the **last** `item.completed` event
+whose `item.type` is `agent_message` and extracts the recipe's contract from its `text` (on disk it
+is JSON-string escaped, so the raw-log regex cannot see it), and decodes `turn.failed` / top-level
+`error` events as failure evidence. The bare-object path the other harnesses use is unchanged.
+
+Config is **user-level and runtime-supplied**: Codex reads `$CODEX_HOME/config.toml` (default
+`~/.codex`). The image bakes **no `auth.json`** — a custom `model_providers.<id>` with
+command-backed bearer auth (`auth.command`/`args`/`cwd`/`timeout_ms`/`refresh_interval_ms`) is the
+launcher's config, not the image's. The entrypoint creates `$CODEX_HOME` and never writes a
+credential there.
 
 ## Versioning
 
@@ -51,6 +76,7 @@ agent-base/
   Dockerfile         FROM jetpackio/devbox; devbox install the harnesses
   devbox.json/.lock  the harness pins (goose-cli, opencode, gh, git, rg, jq)
   entrypoint.sh      git-only seam: clone → branch → project devbox install → exec harness/shell
+  agent-codex        headless Codex seam: codex exec --json in $WORKDIR → $RUN_LOG, exit preserved
 scripts/build-image.sh        reproducible build, tag-by-lockhash, cosign/SBOM stubs (SLSA-L2 TODO)
 .github/workflows/build-image.yaml
 ```

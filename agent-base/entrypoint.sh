@@ -197,7 +197,14 @@ if command -v claude >/dev/null 2>&1; then
     > "$HOME/.claude.json"
 fi
 
-echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)  claude=$(command -v claude)"
+# codex harness (agent-runtime#146): Codex reads user-level config from $CODEX_HOME/config.toml
+# (default ~/.codex). The image bakes NO auth.json — the launcher supplies a custom
+# `model_providers.<id>` with command-backed bearer auth at runtime. Create the home so a mounted
+# config has somewhere to land, and never write a credential here.
+export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$CODEX_HOME"
+
+echo "→ ready: branch=$WORK_BRANCH  goose=$(command -v goose)  opencode=$(command -v opencode)  claude=$(command -v claude)  codex=$(command -v codex)"
 
 # Baseline for the end-of-run stats (agent-finalize): session start time + OpenRouter usage now, so the
 # post-run delta = this run's cost/duration. Best-effort; never blocks the run.
