@@ -42,6 +42,11 @@ agent-codex "<prompt>"        # → codex exec --json "<prompt>"
 - tees stdout+stderr into `$RUN_LOG` (default `/tmp/run.log`) — the file `agent-finalize` reads;
 - exits with Codex's own status, unchanged.
 
+`agent-finalize` decodes that JSONL: `parse_outcome()` reads the **last** `item.completed` event
+whose `item.type` is `agent_message` and extracts the recipe's contract from its `text` (on disk it
+is JSON-string escaped, so the raw-log regex cannot see it), and decodes `turn.failed` / top-level
+`error` events as failure evidence. The bare-object path the other harnesses use is unchanged.
+
 Config is **user-level and runtime-supplied**: Codex reads `$CODEX_HOME/config.toml` (default
 `~/.codex`). The image bakes **no `auth.json`** — a custom `model_providers.<id>` with
 command-backed bearer auth (`auth.command`/`args`/`cwd`/`timeout_ms`/`refresh_interval_ms`) is the

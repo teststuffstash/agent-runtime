@@ -214,21 +214,128 @@ def snapshot():
     open(PRE_LOOP_HEAD, "w").write(head)
 
 
-def parse_outcome(log_path):
-    """Pull the recipe's structured final_output JSON (last matching object) from the run log."""
+# ---- Codex event adapter (#146 / PR#148 review) ---------------------------------------------
+# Native `codex exec --json` emits ONE JSON event per line, and the recipe's final prose — with the
+# contract JSON `parse_outcome` exists to find inside it — rides in the LAST `item.completed` event
+# whose `item.type` is `agent_message`, JSON-STRING ESCAPED. The raw-log regex below cannot see it
+# (its `"ci_passed"` sits behind a backslash, and `json.loads` refuses the escaped body), so a Codex
+# ride reached finalize with NO contract at all: `ci_passed`, `reproduced`, `root_cause`, `branch`
+# and `pr_url` were all lost at the very runtime boundary #146's seam establishes — and because
+# `died_this_round` treats "no report" as "did not finish", a finished Codex round could be struck
+# as a death. The bare-object path stays authoritative for goose/opencode/claude: this adapter is an
+# ADDITION, consulted only when the log really is a Codex event stream.
+CODEX_MESSAGE_ITEM = "agent_message"
+CODEX_FAILURE_EVENT_TYPES = ("turn.failed", "error")
+
+
+def codex_events(text):
+    """Decode a native Codex JSONL stream into its event dicts (a generator; one pass, no copy).
+
+    A line that is not a JSON object is SKIPPED, never fatal: `agent-codex` tees stderr into the
+    same log (`2>&1 | tee`), so a plain-text diagnostic can sit between events, and a truncated
+    final line is exactly what a killed ride leaves behind.
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("type"), str):
+            yield event
+
+
+def _event_message(event):
+    """The human-readable message of one Codex event, or "" — across the three shapes Codex uses."""
+    error = event.get("error")
+    if isinstance(error, dict):
+        error = error.get("message")
+    for candidate in (error, event.get("message"), event.get("text")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    item = event.get("item")
+    if isinstance(item, dict) and isinstance(item.get("message"), str):
+        return item["message"]
+    return ""
+
+
+def codex_failure_evidence(text):
+    """Event-shaped FAILURE evidence in a native Codex stream → plain text ("" when there is none).
+
+    Codex reports a dead turn as `{"type":"turn.failed","error":{"message":…}}`, a dead stream as
+    `{"type":"error","message":…}`, and an item-level fault as an `item.completed` whose
+    `item.type` is `error`. Those messages are the evidence `classify()` reasons over, so they must
+    be readable WITHOUT their JSON envelope — this is that decoded form, which is what makes the
+    seam classification-ready rather than merely JSON-shaped.
+    """
+    out = []
+    for event in codex_events(text):
+        item = event.get("item")
+        item_error = isinstance(item, dict) and item.get("type") == "error"
+        if event["type"] in CODEX_FAILURE_EVENT_TYPES \
+                or (event["type"] == "item.completed" and item_error):
+            message = _event_message(event)
+            if message:
+                out.append(message)
+    return "\n".join(out)
+
+
+def codex_event_text(text):
+    """A native Codex stream → the text `parse_outcome` extracts the contract from.
+
+    The LAST `agent_message` event is the turn's final response — the one carrying the recipe's
+    report — followed by any event-shaped failure evidence, so a stream that DIED can never be
+    mistaken for a round that finished. "" when the log carries no Codex event at all, which is
+    what keeps the bare-object path authoritative for goose/opencode/claude.
+    """
+    final = ""
+    for event in codex_events(text):
+        item = event.get("item")
+        if (event["type"] == "item.completed" and isinstance(item, dict)
+                and item.get("type") == CODEX_MESSAGE_ITEM
+                and isinstance(item.get("text"), str) and item["text"].strip()):
+            final = item["text"]
+    failure = codex_failure_evidence(text)
+    return "\n".join(part for part in (final, failure) if part)
+
+
+def _extract_contract(text):
+    """The recipe's structured final_output JSON (last well-formed object) inside `text`, or {}.
+
+    The recipe emits a brace-free-inner JSON object with these keys; take the last well-formed one.
+    """
     keys = ("reproduced", "ci_passed", "branch", "pr_url", "coverage_pct", "root_cause")
     found = {}
-    try:
-        text = open(log_path, errors="replace").read()
-    except Exception:
-        return found
-    # The recipe emits a brace-free-inner JSON object with these keys; take the last well-formed one.
     for m in re.finditer(r'\{[^{}]*"(?:reproduced|pr_url|ci_passed)"[^{}]*\}', text):
         try:
             obj = json.loads(m.group(0))
             found = {k: obj[k] for k in keys if k in obj}
         except Exception:
             continue
+    return found
+
+
+def parse_outcome(log_path):
+    """Pull the recipe's structured final_output JSON (last matching object) from the run log.
+
+    TWO shapes reach this, and both must work (#146 / PR#148): the bare object goose/opencode/claude
+    print in the clear — unchanged, and still the answer for them — and a native `codex exec --json`
+    stream, where the contract is JSON-string escaped inside the final `agent_message` event. The
+    Codex path is consulted only when the log IS an event stream and only when it yields a contract,
+    so it can never displace the bare-object answer.
+    """
+    try:
+        text = open(log_path, errors="replace").read()
+    except Exception:
+        return {}
+    found = _extract_contract(text)
+    event_text = codex_event_text(text)
+    if event_text:
+        decoded = _extract_contract(event_text)
+        if decoded:
+            return decoded
     return found
 
 

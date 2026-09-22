@@ -65,6 +65,68 @@ def _code_only(text):
     return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
 
 
+# The recipe's structured end-of-run report, as a Codex ride emits it: the prose is the LAST
+# `agent_message` event's `item.text`, so the contract lands on disk JSON-STRING ESCAPED.
+CODEX_CONTRACT = {
+    "reproduced": True,
+    "ci_passed": True,
+    "root_cause": "no bug — built the seam",
+    "branch": "fix/issue-146-codex-headless-seam",
+    "pr_url": "https://github.com/teststuffstash/agent-runtime/pull/148",
+}
+
+
+def _native_stream(contract=CODEX_CONTRACT, extra=()):
+    """The four native `codex exec --json` events, as JSONL — the review's (PR#148) shape."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread_abc"},
+        {"type": "turn.started"},
+        {"type": "item.completed",
+         "item": {"id": "item_0", "type": "agent_message",
+                  "text": "Final report:\n" + json.dumps(contract) + "\n"}},
+        {"type": "turn.completed",
+         "usage": {"input_tokens": 42, "cached_input_tokens": 12, "output_tokens": 5}},
+    ]
+    return "".join(json.dumps(e) + "\n" for e in list(events) + list(extra))
+
+
+def _fake_codex_emitting(tmp_path, jsonl):
+    """A fake `codex` that writes `jsonl` to stdout (a file it cats, so quoting stays honest)."""
+    stream = tmp_path / "stream.jsonl"
+    stream.write_text(jsonl, encoding="utf-8")
+    return _fake_codex(tmp_path, 'cat "%s"\n' % stream)
+
+
+class TestFinalizationCompatibility:
+    """The seam's run log must be USABLE BY agent-finalize, not merely valid JSONL (#146 req 2).
+
+    The review's core point (RasmusSoot, PR#148): a fixture emitting only `thread.started` /
+    `turn.completed` proves JSON syntax, not compatibility with finalization. So the fixture here
+    emits the four NATIVE events with the contract escaped inside the final `agent_message` — the
+    real on-disk shape — and the assertions run agent-finalize's own `parse_outcome()` over the log
+    the seam actually wrote.
+    """
+
+    def test_the_seam_writes_a_log_finalize_can_read(self, tmp_path, af):
+        proc, run_log, _ = _run_seam(tmp_path, _fake_codex_emitting(tmp_path, _native_stream()))
+        assert proc.returncode == 0, proc.stderr
+        assert af.parse_outcome(str(run_log)) == CODEX_CONTRACT
+
+    def test_a_failed_codex_run_is_not_read_as_a_finished_round(self, tmp_path, af):
+        """`turn.failed` + a nonzero Codex: the exit status survives the tee AND finalize finds no
+        contract, so the round is strikable rather than read as one that reported its own end."""
+        stream = (
+            json.dumps({"type": "thread.started", "thread_id": "t"}) + "\n"
+            + json.dumps({"type": "turn.failed",
+                          "error": {"message": "stream error: 401 Unauthorized"}}) + "\n"
+        )
+        codex = _fake_codex_emitting(tmp_path, stream)
+        codex.write_text(codex.read_text(encoding="utf-8") + "exit 7\n", encoding="utf-8")
+        proc, run_log, _ = _run_seam(tmp_path, codex)
+        assert proc.returncode == 7, proc.stderr
+        assert af.parse_outcome(str(run_log)) == {}
+
+
 class TestHeadlessContract:
     def test_seam_ships_executable(self):
         assert SEAM.is_file(), "agent-base/agent-codex is missing"
@@ -98,14 +160,16 @@ class TestHeadlessContract:
         assert proc.returncode == 7
 
     def test_leaves_a_parseable_jsonl_run_log(self, tmp_path):
-        codex = _fake_codex(
-            tmp_path,
-            'echo \'{"type":"thread.started"}\'\n'
-            'echo \'{"type":"turn.completed"}\'\n',
-        )
-        proc, run_log, _ = _run_seam(tmp_path, codex)
+        """The FIXTURE is the four native events, not two stubs: JSONL-ness is pinned on the shape
+        a real Codex emits, so `TestFinalizationCompatibility` can read the same log."""
+        proc, run_log, _ = _run_seam(tmp_path, _fake_codex_emitting(tmp_path, _native_stream()))
         assert proc.returncode == 0, proc.stderr
-        assert [e["type"] for e in _jsonl(run_log)] == ["thread.started", "turn.completed"]
+        assert [e["type"] for e in _jsonl(run_log)] == [
+            "thread.started",
+            "turn.started",
+            "item.completed",
+            "turn.completed",
+        ]
 
     def test_run_log_captures_stderr_too(self, tmp_path):
         """agent-finalize reads ONE file; a Codex diagnostic on stderr must land in it."""
