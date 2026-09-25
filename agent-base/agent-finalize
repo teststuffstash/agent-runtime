@@ -1714,6 +1714,40 @@ def strike_marker(stats):
     return line
 
 
+MAJOR_LABEL = "major"
+
+
+def pr_major_status(gh, pr_url):
+    """Is this PR in the human-merge lane? → "major" | "clear" | "unreadable" (homelab S9 #1987).
+
+    A Renovate `major` PR is never self-merged: it waits for the reviewer's migration evidence and
+    a HUMAN merge (`major/awaiting-human`, homelab `agents/major-handoff.sh`). Finalize used to arm
+    every PR it held unless `AGENT_ARM_PR=0` or the round died — so sleep-iac#90, a `major` bump a
+    fix-round worker was riding, got `auto-merge armed` and landed with zero review. The label is
+    the lane marker, so the label is what this reads.
+
+    Fail-closed by construction: arming is the WRITE, and rule #6 of the platform is never to fail
+    INTO a write. An unreadable labels probe is therefore its own answer ("unreadable"), distinct
+    from "clear" — the caller must not arm on it. The probe is the label list only (`--json
+    labels`), never the body: a body can mention the word."""
+    try:
+        cur = gh("pr", "view", pr_url, "--json", "labels")
+    except Exception:  # noqa: BLE001 — TimeoutExpired, OSError, …: the probe did not read
+        # A probe that RAISES (the gh wrapper's timeout=30, a dead network) must not escape to
+        # bookkeeping()'s broad handler: that returns with `armed_by_pod` UNSET, and unset is what
+        # the launcher's fallback arms (reviewer, agent-runtime#156). Raising is unreadable too.
+        return "unreadable"
+    if cur.returncode != 0:
+        return "unreadable"
+    try:
+        # "clear" is a POSITIVE reading of an empty list: the payload must be an object carrying
+        # the `labels` key. Empty stdout, a non-object, or a keyless object is no reading at all.
+        names = [lab.get("name") for lab in json.loads(cur.stdout)["labels"]]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return "unreadable"
+    return "major" if MAJOR_LABEL in names else "clear"
+
+
 def bookkeeping(stats, log_path):
     """In-pod GitHub bookkeeping (FU-064/FU-043): with a PR from a round that ENDED — arm
     auto-merge (an un-armed PR is invisible to the ENTIRE merge path: updater, review reflex,
@@ -1763,6 +1797,21 @@ def bookkeeping(stats, log_path):
             elif os.environ.get("AGENT_ARM_PR", "1") == "0":
                 stats["armed_by_pod"] = False
                 print("bookkeeping: arming SKIPPED (AGENT_ARM_PR=0 — human-gated PR)", flush=True)
+            elif (_major := pr_major_status(gh, pr_url)) == "major":
+                # The human-merge lane (homelab S9 #1987): a `major` dependency bump waits for the
+                # reviewer's migration evidence + a human merge. Same shape as AGENT_ARM_PR=0 —
+                # the flag is FALSE so the launcher's fallback does not arm it either.
+                stats["armed_by_pod"] = False
+                print("bookkeeping: arming SKIPPED (PR carries `major` — human-merge lane, "
+                      "homelab S9 #1987)", flush=True)
+            elif _major == "unreadable":
+                # Fail-closed: arming is the write; an unreadable lane marker never arms (platform
+                # rule #6). FALSE, not unset — the launcher must not arm on the pod's behalf either;
+                # the review reflex re-arms once the labels read (and it excludes `major` itself).
+                stats["armed_by_pod"] = False
+                print("bookkeeping: arming SKIPPED (labels probe UNREADABLE — fail-closed, a PR "
+                      "whose `major` status cannot be read is not armed; reflex re-arms once "
+                      "readable, homelab S9 #1987)", flush=True)
             else:
                 armed = gh("pr", "merge", pr_url, "--auto", "--squash")
                 if armed.returncode == 0:

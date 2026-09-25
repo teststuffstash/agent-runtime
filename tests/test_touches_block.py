@@ -50,6 +50,8 @@ class FakeGH:
         if argv[:2] == ["issue", "view"]:
             return _Done(0, self.issue_body)
         if argv[:2] == ["pr", "view"]:
+            if "labels" in argv:
+                return _Done(0, '{"labels": []}')  # readable, no `major` (homelab #1987)
             if "headRefOid" in argv:
                 return _Done(0, "deadbee\n")
             return _Done(0, self.pr_body)

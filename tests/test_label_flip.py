@@ -29,10 +29,15 @@ class FakeGH:
     corresponding write refuse, to pin the ordering discipline."""
 
     def __init__(self, issue_body="Touches: tests/\n", pr_body="Fixes #73\n",
-                 fail_body_read=False, fail_add=False, fail_remove=False):
+                 fail_body_read=False, fail_add=False, fail_remove=False,
+                 labels=(), fail_labels_read=False):
         self.issue_body = issue_body
         self.pr_body = pr_body
         self.fail_body_read = fail_body_read
+        # The PR's label NAMES, served to the `--json labels` lane probe (homelab S9 #1987);
+        # `fail_labels_read` makes that ONE probe refuse while the body read still works.
+        self.labels = list(labels)
+        self.fail_labels_read = fail_labels_read
         self.fail_add = fail_add
         self.fail_remove = fail_remove
         self.comments = []
@@ -57,6 +62,10 @@ class FakeGH:
                 return _Done(1, "", "Label 'agent/in-progress' does not exist\n")
             return _Done(0)
         if argv[:2] == ["pr", "view"]:
+            if "labels" in argv:
+                if self.fail_labels_read:
+                    return _Done(1, "", "HTTP 502: Server Error\n")
+                return _Done(0, json.dumps({"labels": [{"name": n} for n in self.labels]}))
             if self.fail_body_read:
                 return _Done(1, "", "fatal: repository not found\n")
             if "headRefOid" in argv:

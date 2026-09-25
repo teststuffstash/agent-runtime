@@ -67,6 +67,8 @@ class FakeGitHub:
         self.calls.append((tuple(args), stdin))
         argv = list(args)
         if argv[:2] == ["pr", "view"]:
+            if "labels" in argv:
+                return _Done(0, '{"labels": []}')  # readable, no `major` (homelab #1987)
             if "headRefOid" in argv:
                 return _Done(self.sha_rc, "" if self.sha_rc else self.sha + "\n")
             return _Done(0, "a PR body naming no issue\n")  # the #32 issue-link read
