@@ -65,6 +65,15 @@ class TestPrMajorStatus:
         assert af.pr_major_status(empty, "https://github.com/o/r/pull/90") == "unreadable"
         assert af.pr_major_status(keyless, "https://github.com/o/r/pull/90") == "unreadable"
 
+    def test_a_raising_probe_is_unreadable(self, af):
+        """The gh wrapper runs `subprocess.run(..., timeout=30)`: a slow GitHub RAISES
+        TimeoutExpired rather than returning rc != 0. Left uncaught it would escape to
+        bookkeeping()'s broad handler with `armed_by_pod` UNSET — which the launcher fallback
+        arms (reviewer finding on agent-runtime#156). Raising is unreadable, not an escape."""
+        def gh(*args, stdin=None, timeout=30):
+            raise af.subprocess.TimeoutExpired(cmd=["gh", *args], timeout=timeout)
+        assert af.pr_major_status(gh, "https://github.com/o/r/pull/90") == "unreadable"
+
     def test_the_probe_reads_labels_not_the_body(self, af):
         """A PR BODY may say the word (`Upstream: v3 is a major …`); the lane marker is the label
         list alone, so the probe must ask for `labels` and nothing else."""
@@ -125,6 +134,23 @@ class TestBookkeepingNeverArmsMajor:
                 if ln.startswith("bookkeeping: arming SKIPPED (labels probe UNREADABLE")]
         assert len(loud) == 1
         assert "fail-closed" in loud[0]
+
+    def test_a_probe_timeout_does_not_arm(self, af, monkeypatch, logfile, capsys):
+        """The seam under the raise: the labels probe times out, everything else answers →
+        zero `pr merge`, `armed_by_pod` FALSE (not unset — the exception must not reach the
+        broad handler), the unreadable line. The body read and the issue link still run."""
+        class TimingOutGH(FakeGH):
+            def __call__(self, *args, stdin=None, timeout=30):
+                if args[:2] == ("pr", "view") and "labels" in args:
+                    self.calls.append((tuple(args), stdin))
+                    raise af.subprocess.TimeoutExpired(cmd=["gh", *args], timeout=timeout)
+                return super().__call__(*args, stdin=stdin, timeout=timeout)
+        gh = TimingOutGH(pr_body="Fixes #73\n", labels=[])
+        stats, out = self._run(af, monkeypatch, logfile, gh, capsys)
+        assert self._merges(gh) == []
+        assert "armed_by_pod" in stats and stats["armed_by_pod"] is False
+        assert [ln for ln in out.splitlines()
+                if ln.startswith("bookkeeping: arming SKIPPED (labels probe UNREADABLE")]
 
     def test_a_pr_without_major_is_armed_as_before(self, af, monkeypatch, logfile, capsys):
         """The unchanged path: labels readable, no `major` → exactly one `pr merge --auto --squash`

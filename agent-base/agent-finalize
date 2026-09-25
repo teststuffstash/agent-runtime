@@ -1730,7 +1730,13 @@ def pr_major_status(gh, pr_url):
     INTO a write. An unreadable labels probe is therefore its own answer ("unreadable"), distinct
     from "clear" — the caller must not arm on it. The probe is the label list only (`--json
     labels`), never the body: a body can mention the word."""
-    cur = gh("pr", "view", pr_url, "--json", "labels")
+    try:
+        cur = gh("pr", "view", pr_url, "--json", "labels")
+    except Exception:  # noqa: BLE001 — TimeoutExpired, OSError, …: the probe did not read
+        # A probe that RAISES (the gh wrapper's timeout=30, a dead network) must not escape to
+        # bookkeeping()'s broad handler: that returns with `armed_by_pod` UNSET, and unset is what
+        # the launcher's fallback arms (reviewer, agent-runtime#156). Raising is unreadable too.
+        return "unreadable"
     if cur.returncode != 0:
         return "unreadable"
     try:
