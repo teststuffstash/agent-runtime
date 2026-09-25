@@ -45,7 +45,7 @@ jobs:
       # job's success is what deploy-pin waits on — so the gate means exactly "the load-bearing
       # artifact shipped". That tag is what homelab agents/images.env pins, so it is the only one
       # any worker pod actually pulls.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: agent-base/Dockerfile
