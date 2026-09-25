@@ -53,7 +53,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: jetify-com/devbox-install-action@v0.13.0
+      - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
         with:
           enable-cache: "true"
       - name: devbox run ci
