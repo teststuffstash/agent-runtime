@@ -160,6 +160,10 @@ class TestBookkeepingWiring:
             # emit its channels here too. `[]` is a READABLE empty timeline — an empty stdout is
             # not, and `post_summary_event` fails closed on it by design; the channel's own cases
             # live in tests/test_summary_channel.py.
+            # Lane probe (homelab S9 #1987): gh pr view <url> --json labels — a READABLE, empty
+            # label list: no `major` → the ordinary arm path.
+            if args[1:3] == ("pr", "view") and "labels" in args:
+                return _Done(0, '{"labels": []}')
             if "api" in args and "--method" not in args:
                 return _Done(0, "[]")
             return _Done()
