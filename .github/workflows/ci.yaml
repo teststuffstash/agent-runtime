@@ -35,7 +35,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GUARD_SET: agent-base/devbox.json agent-base/devbox.lock
         run: sh scripts/deps-pin-guard.sh
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build agent-base image (no push)
         uses: docker/build-push-action@v6
         with:
