@@ -24,7 +24,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # The carved-out dep-bump lane's replacement owner (CODEOWNERS un-owns
       # agent-base/devbox.{json,lock}; this asserts such a PR is a pure version/hash diff).
       # gh comes baked in the ARC runner image (homelab docker/arc-runner/).
@@ -35,9 +35,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GUARD_SET: agent-base/devbox.json agent-base/devbox.lock
         run: sh scripts/deps-pin-guard.sh
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build agent-base image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: agent-base/Dockerfile
@@ -52,7 +52,7 @@ jobs:
       # owner on /.github/workflows/ (CODEOWNERS) — a rule stricter than the review it stands in for.
       - name: Fetch homelab's pin-only-lint at master
         if: github.event_name == 'pull_request'
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: teststuffstash/homelab
           ref: master
@@ -81,7 +81,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: jetify-com/devbox-install-action@v0.13.0
         with:
           enable-cache: "true"
