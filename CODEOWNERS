@@ -13,6 +13,15 @@
 # fleet pulls, and open the deploy-pin PR into homelab.
 /.github/                       @RasmusSoot
 
+# ── Renovate's action-pin lane (homelab ADR-100 addendum / ADR-141, S9 #1990). Ownership is
+# REPLACED, not dropped: `pin-only-lint` (homelab scripts/pin-only-lint.sh, run inside the
+# required `ci` check) allows only verified action pin bumps (`uses: owner/repo@sha # tag`, the
+# SHA resolved upstream to the tag's commit, pairs only, first-party refs frozen) through a PR;
+# a real workflow edit takes the operator path straight to master, where the check does not run.
+# Post-merge failures of push-only workflows roll back via the FU-1990 chain (drill passed on
+# agent-coordinator, 2026-09-27). One-line revert: restore the owner below.
+/.github/workflows/
+
 # ── The image definition + toolchain. A dep or base-image change ships to every ride at once, and
 # the lockfiles are what make a rebuild reproducible.
 /agent-base/Dockerfile          @RasmusSoot
