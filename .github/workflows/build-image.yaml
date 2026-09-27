@@ -15,6 +15,14 @@ on:
       - "agent-base/**"
       - ".github/workflows/build-image.yaml"
   workflow_dispatch:
+  # WEEKLY REBUILD (operator, 2026-09-27): the image installs `@anthropic-ai/claude-code` (and gh)
+  # at their LATEST at build time — deliberately unpinned ("only pin things Renovate will update;
+  # better a weekly latest than a year-old pin"). A float only delivers if the image is REBUILT:
+  # without this schedule a quiet repo never rebuilds and the harness version sits still for
+  # months, unnoticed. Every rebuild is a NEW versioned tag (build date, below) that deploy-pin
+  # rolls out and the cluster pin can revert (agents/images.env + kustomization newTag).
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
 
 jobs:
   image:
@@ -37,10 +45,22 @@ jobs:
       # filter above keeps it from churning on changes that don't affect the image.
       - name: Compute version
         id: ver
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/agent-base
         run: |
           SHA=$(git rev-parse --short=12 HEAD)
-          DATE=$(git show -s --format=%cd --date=format:'%Y.%-m.%-d' HEAD)
-          echo "tag=${DATE}-g${SHA}" >> "$GITHUB_OUTPUT"
+          # BUILD date, not commit date (2026-09-27): a scheduled rebuild of an unchanged commit must
+          # be a NEW tag — same content-address on a different day means different floating deps —
+          # never an overwrite of the tag the cluster already runs. A same-day rebuild of the same
+          # commit (a push build followed by the cron) would collide, so an existing tag gets the
+          # run number appended: the manifest probe is the only source of truth for "exists".
+          DATE=$(date -u +%Y.%-m.%-d)
+          TAG="${DATE}-g${SHA}"
+          if docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+            TAG="${TAG}.${GITHUB_RUN_NUMBER}"
+            echo "tag ${DATE}-g${SHA} already published — this build is ${TAG}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
       # Only the VERSIONED tag is pushed here. This step's success is the job's red/green, and the
       # job's success is what deploy-pin waits on — so the gate means exactly "the load-bearing
       # artifact shipped". That tag is what homelab agents/images.env pins, so it is the only one
