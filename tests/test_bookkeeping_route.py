@@ -29,6 +29,7 @@ the pre-#49 route (arm + stats comment, no `AGENT_STRIKE`). The table is hand-ma
 test has to pin it to something the table cannot move.
 """
 import ast
+import json
 
 
 def _signature_exit_statuses(source):
@@ -75,18 +76,18 @@ class TestBookkeepingRoute:
 
     def test_pr_and_clean_arms(self, af):
         """The ordinary green fix round: artifact exists, round ended well."""
-        assert af.bookkeeping_route({"pr_url": "http://x/1", "exit_status": "clean"}) == "arm"
+        assert af.bookkeeping_route({"pr_url": "https://github.com/o/r/pull/1", "exit_status": "clean"}) == "arm"
 
     def test_pr_and_ci_red_still_arms(self, af):
         """`ci-failed` is a verdict on the WORK, not a death of the round — the PR still gets
         armed and commented (the updater/review reflex owns the red). Unchanged by #49."""
-        assert af.bookkeeping_route({"pr_url": "http://x/1", "exit_status": "ci-failed"}) == "arm"
+        assert af.bookkeeping_route({"pr_url": "https://github.com/o/r/pull/1", "exit_status": "ci-failed"}) == "arm"
 
     def test_pr_and_harness_death_strikes(self, af):
         """THE bug (#49). circles#32 r3 shape: an inherited PR on a round killed by a `-32602`
         truncation. #36 made `classify()` say `harness-death`; bookkeeping still armed it."""
         assert af.bookkeeping_route(
-            {"pr_url": "http://x/1", "exit_status": "harness-death"}) == "strike"
+            {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death"}) == "strike"
 
     def test_every_death_class_strikes_with_a_pr(self, af, af_source):
         """Every class `failure_signature()` can return through `died_this_round()` — enumerated
@@ -96,7 +97,7 @@ class TestBookkeepingRoute:
         noticed. Read from the source, the new class fails this loop the day it lands."""
         for status in sorted(_signature_exit_statuses(af_source) - {"no-artifact"}):
             assert af.bookkeeping_route(
-                {"pr_url": "http://x/1", "exit_status": status}) == "strike", (
+                {"pr_url": "https://github.com/o/r/pull/1", "exit_status": status}) == "strike", (
                 f"`{status}` is a failure_signature death class that still arms auto-merge — "
                 "add it to DEATH_EXIT_STATUSES (#49 re-opened for the new class)")
 
@@ -115,7 +116,7 @@ class TestBookkeepingRoute:
         and so must this. Same exclusion, same reason, same answer."""
         assert "no-artifact" not in af.DEATH_EXIT_STATUSES
         assert af.bookkeeping_route(
-            {"pr_url": "http://x/1", "exit_status": "no-artifact"}) == "arm"
+            {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "no-artifact"}) == "arm"
 
     def test_no_pr_strikes(self, af):
         """The first-round shape — unchanged."""
@@ -139,22 +140,26 @@ class TestBookkeepingWiring:
                 self.returncode, self.stdout, self.stderr = rc, out, err
 
         def _fake_run(argv, **kw):
-            calls.append(tuple(argv))
             args = tuple(argv)
-            # PR body read: gh pr view <url> --json body --jq .body
-            if args[1:3] == ("pr", "view") and "--json" in args and "body" in args:
-                return _Done(0, pr_body)
-            # PR check (#107): gh pr view <num> --repo <slug> --json number --jq .number
-            if args[1:3] == ("pr", "view") and "--repo" in args and "number" in args:
-                num = args[3]
+            # A REST write carries its payload on stdin (`gh api --input -`); it is recorded as
+            # the LAST element so `c[-1]` stays "the body this call wrote", as it was for
+            # `pr edit --body <body>` before the #32 guarantee moved to REST (homelab#2063).
+            if kw.get("input") is not None:
+                args = args + (kw["input"],)
+            calls.append(args)
+            # The #32 PR read (REST, homelab#2063): gh api repos/<slug>/pulls/<n> → the PR object,
+            # body and base in one read.
+            if args[1:3] == ("api", "repos/o/r/pulls/1") and "--jq" not in args \
+                    and "--method" not in args:
+                return _Done(0, json.dumps({"body": pr_body, "base": {"ref": base_branch}}))
+            # PR check (#107, REST): gh api repos/<slug>/pulls/<num> --jq .number — 404 for an issue
+            if args[1] == "api" and args[2].startswith("repos/o/r/pulls/") and ".number" in args:
+                num = args[2].rsplit("/", 1)[-1]
                 if is_pr and num in is_pr:
                     return _Done(0, num)
-                return _Done(1, "")
-            # Base branch check (#107): gh pr view <url> --json baseRefName --jq .baseRefName
-            if args[1:3] == ("pr", "view") and "baseRefName" in args:
-                return _Done(0, base_branch)
-            # Default branch check (#107): gh repo view <slug> --json defaultBranch --jq .defaultBranch
-            if args[1:3] == ("repo", "view") and "defaultBranch" in args:
+                return _Done(1, "", "HTTP 404: Not Found")
+            # Default branch check (#107, REST): gh api repos/<slug> --jq .default_branch
+            if args[1:3] == ("api", "repos/o/r") and ".default_branch" in args:
                 return _Done(0, default_branch)
             # Canned answers for the two ADR-103 reads (#62), so the arm leg gets far enough to
             # emit its channels here too. `[]` is a READABLE empty timeline — an empty stdout is
@@ -182,6 +187,16 @@ class TestBookkeepingWiring:
     def _find(calls, *prefix):
         return [c for c in calls if c[1:1 + len(prefix)] == prefix]
 
+    @staticmethod
+    def _pr_body_edits(calls):
+        """The bodies the #32 guarantee WROTE — one per REST PATCH of the PR
+        (`gh api --method PATCH repos/<slug>/pulls/<n> --input -`, payload `{"body": …}`). The
+        guarantee used to write with `gh pr edit --body <body>`; the transport moved to REST in
+        homelab#2063 (GraphQL shares the App installation's pool the ride drains), and the
+        assertions below read the same thing they always did: what landed in the body."""
+        return [json.loads(c[-1])["body"] for c in calls
+                if c[1:4] == ("api", "--method", "PATCH") and c[4] == "repos/o/r/pulls/1"]
+
     def test_clean_round_with_a_pr_arms_and_comments(self, af, monkeypatch, logfile):
         """The path that must NOT change — except for WHERE the stats land (#62/ADR-103): the
         table is now the `agent-ride` check-run and the index line is an append to the single
@@ -198,7 +213,7 @@ class TestBookkeepingWiring:
     def test_died_round_with_an_inherited_pr_strikes_instead_of_arming(
             self, af, monkeypatch, logfile):
         """#49, end to end: no arm, no stats comment, an `AGENT_STRIKE:` comment on the issue."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-32602-truncation", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
         assert not self._find(calls, "pr", "merge")
@@ -214,7 +229,7 @@ class TestBookkeepingWiring:
     def test_the_strike_first_line_stays_byte_stable(self, af, monkeypatch, logfile):
         """The coordinator greps this line to walk the model chain — format is a contract, and a
         died round with a PR must produce the SAME one as a died round without."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-32602-truncation", "pod": "pod-7"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
         body = self._find(calls, "issue", "comment")[0][-1]
@@ -225,7 +240,7 @@ class TestBookkeepingWiring:
     def test_strike_line_includes_provider_when_set(self, af, monkeypatch, logfile):
         """#127 — when stats['provider'] is populated (from router_report), the strike line
         appends provider=<p> at the end."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "pod-5", "provider": "openrouter/rail"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
         body = self._find(calls, "issue", "comment")[0][-1]
@@ -237,7 +252,7 @@ class TestBookkeepingWiring:
     def test_strike_line_omits_provider_when_empty(self, af, monkeypatch, logfile):
         """#127 — when stats['provider'] is absent or empty (subscription ride), the strike line
         is unchanged — no provider field appended."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "pod-5"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
         body = self._find(calls, "issue", "comment")[0][-1]
@@ -251,7 +266,7 @@ class TestBookkeepingWiring:
         posts `KEY-RETRY:` so the coordinator's chain-walk (which greps `AGENT_STRIKE:`) does not
         strike a healthy model off the chain. homelab#1780 r1 posted an `AGENT_STRIKE: …
         error_class=budget-exhausted-key` and no `KEY-RETRY:` anywhere."""
-        stats = {"pr_url": "http://x/1", "exit_status": "budget-403",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "budget-403",
                  "error_class": "budget-exhausted-key", "pod": "pod-7",
                  "budget_match": "key limit exceeded"}
         calls = self._run(af, monkeypatch, logfile("key limit exceeded\n"), stats)
@@ -286,44 +301,44 @@ class TestBookkeepingWiring:
     def test_a_died_round_still_guarantees_the_issue_link(self, af, monkeypatch, logfile):
         """#32 holds on both legs: the artifact is real either way, and an unlinked PR gets the
         issue re-dispatched onto finished work."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) == 1
-        assert edited[0][-1].startswith("Implements #49")
+        assert edited[0].startswith("Implements #49")
         assert stats.get("issue_link_added_by_pod") is True
 
     def test_issue_link_prepended_when_body_only_has_refs(self, af, monkeypatch, logfile):
         """#87: `Refs #N` is a weak mention — it must NOT suppress the `Implements #N` prepend
         because the strong-link readers (scan, goal closeout) require
         `Implements|Fixes #N`."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="Refs #49\n")
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) == 1, "Implements #49 should be prepended despite Refs #49"
-        assert edited[0][-1].startswith("Implements #49")
+        assert edited[0].startswith("Implements #49")
         assert stats.get("issue_link_added_by_pod") is True
 
     def test_issue_link_not_duplicated_when_implements_present(self, af, monkeypatch, logfile):
         """#87 idempotency: `Implements #N` is already strong — the prepend must be skipped."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="Implements #49\n")
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) == 0, "Implements #49 already present — no edit needed"
         assert stats.get("issue_link_added_by_pod") is not True
 
     def test_issue_link_not_duplicated_when_fixes_present(self, af, monkeypatch, logfile):
         """#87 idempotency: `Fixes #N` is also strong — the prepend must be skipped."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="Fixes #49\n")
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) == 0, "Fixes #49 already present — no edit needed"
         assert stats.get("issue_link_added_by_pod") is not True
 
@@ -331,7 +346,7 @@ class TestBookkeepingWiring:
         """AGENT_ARM_PR=0 (human-gated roles) must stay un-armed on the death path too — and the
         skip is recorded, so the launcher fallback does not arm it either."""
         monkeypatch.setenv("AGENT_ARM_PR", "0")
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats)
         assert not self._find(calls, "pr", "merge")
@@ -341,71 +356,70 @@ class TestBookkeepingWiring:
 
     def test_closing_keyword_aimed_at_pr_rewrites_to_refs(self, af, monkeypatch, logfile):
         """#107 Fix 1: `Fixes #309` where #309 is a PR → rewrite to `Refs #309` in the body."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="Fixes #309\n", is_pr={"309"})
         # Should have edited the body to rewrite Fixes #309 → Refs #309
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) >= 1
-        body_arg = edited[0][-1]
+        body_arg = edited[0]
         assert "Refs #309" in body_arg
         assert "Fixes #309" not in body_arg
 
     def test_closing_keyword_aimed_at_issue_left_alone(self, af, monkeypatch, logfile):
         """#107 Fix 1: `Fixes #107` where #107 is an issue (not a PR) → left alone."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="Fixes #107\n", is_pr=set())
         # The body should NOT have been edited for the closing keyword (no PR match)
         # But the issue link prepend may still happen
-        edited = self._find(calls, "pr", "edit")
-        for body in (e[-1] for e in edited):
+        edited = self._pr_body_edits(calls)
+        for body in edited:
             assert "Fixes #107" in body, (
                 "Fixes #107 should remain as-is when #107 is not a PR")
 
     def test_default_branch_pr_uses_fixes_not_implements(self, af, monkeypatch, logfile):
         """#107 Fix 2: on a default-branch-based PR, the issue link uses `Fixes` not `Implements`."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="some body\n", base_branch="main", default_branch="main")
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) >= 1
-        body_arg = edited[0][-1]
+        body_arg = edited[0]
         assert body_arg.startswith("Fixes #49"), (
             "Default-branch PR should use Fixes, got: %s" % body_arg[:30])
 
     def test_non_default_branch_pr_uses_implements(self, af, monkeypatch, logfile):
         """#107 Fix 2: on a non-default-branch PR, the issue link uses `Implements`."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="some body\n", base_branch="goal/foo", default_branch="main")
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) >= 1
-        body_arg = edited[0][-1]
+        body_arg = edited[0]
         assert body_arg.startswith("Implements #49"), (
             "Non-default-branch PR should use Implements, got: %s" % body_arg[:30])
 
     def test_repeated_closing_keyword_dedups_gh_lookups(self, af, monkeypatch, logfile):
-        """#112: repeated `Fixes #309` in the body should issue one `gh pr view` for #309."""
-        stats = {"pr_url": "http://x/1", "exit_status": "harness-death",
+        """#112: repeated `Fixes #309` in the body should issue one PR-number probe for #309."""
+        stats = {"pr_url": "https://github.com/o/r/pull/1", "exit_status": "harness-death",
                  "error_class": "goose-panic", "pod": "p"}
         calls = self._run(af, monkeypatch, logfile("boom\n"), stats,
                           pr_body="Fixes #309\nSee also Fixes #309\nCloses #309\n",
                           is_pr={"309"})
         # Count gh pr view calls for #309 (the PR-check lookup)
         pr_checks = [c for c in calls
-                     if c[1:3] == ("pr", "view") and "--repo" in c and "number" in c
-                     and c[3] == "309"]
+                     if c[1:3] == ("api", "repos/o/r/pulls/309") and ".number" in c]
         assert len(pr_checks) == 1, (
-            "Expected 1 gh pr view for #309, got %d: %s" % (len(pr_checks), pr_checks))
+            "Expected 1 PR-number probe for #309, got %d: %s" % (len(pr_checks), pr_checks))
         # The body should have all three rewritten to Refs #309
-        edited = self._find(calls, "pr", "edit")
+        edited = self._pr_body_edits(calls)
         assert len(edited) >= 1
-        body_arg = edited[0][-1]
+        body_arg = edited[0]
         assert body_arg.count("Refs #309") == 3, (
             "Expected 3 Refs #309 in body, got: %s" % body_arg)
         assert "Fixes #309" not in body_arg
