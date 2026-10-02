@@ -580,8 +580,13 @@ def _goose_cap_reached(text):
     a different form ('Reached max turns'). Match as a message/error, not arbitrary content."""
     # The goose cap appears as an error message in the log, typically at the start of a line
     # or after typical log markers. Avoid matching it in user content (docs, issue bodies).
+    # goose prints the cap sentence straight after the last tool output with NO newline when that
+    # output lacks a trailing one (oracle-fleet#774 r5: `..."state":"OPEN"}I've reached …` → the
+    # line-anchored form missed it and a turn-cap death was recorded `clean`). The full sentence
+    # ending the log is the second, position-anchored form — quoted content never ends the run.
     return re.search(
-        r"(?:^|\n)\s*I've reached the maximum number of actions",
+        r"(?:^|\n)\s*I've reached the maximum number of actions"
+        r"|I've reached the maximum number of actions I can do without user input\.[^\n]*\s*\Z",
         text,
         re.MULTILINE
     ) is not None
