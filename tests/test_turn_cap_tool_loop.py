@@ -59,6 +59,15 @@ class TestTurnCapDetection:
             s, e = af.classify(logfile(log), {"harness": "goose"})
         assert (s, e) == ("harness-death", "tool-loop")
 
+    def test_turn_cap_glued_to_tool_output_is_turn_cap(self, af, logfile, tmp_path):
+        """oracle-fleet#774 r5: the cap sentence follows tool output with no newline — still a cap."""
+        log = ('{"mergeStateStatus":"BLOCKED","state":"OPEN"}'
+               "I've reached the maximum number of actions I can do without user input. "
+               "Would you like me to continue?\n")
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            s, e = af.classify(logfile(log), {"harness": "goose"})
+        assert (s, e) == ("harness-death", "turn-cap")
+
     def test_turn_cap_only_for_goose(self, af, logfile):
         """Claude harness cannot die of goose turn-cap signature."""
         log = "I've reached the maximum number of actions…\n"
