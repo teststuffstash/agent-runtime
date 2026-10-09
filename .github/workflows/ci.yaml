@@ -85,5 +85,8 @@ jobs:
       - uses: jetify-com/devbox-install-action@8c6a66ed6273138b1915457069de78cb52fe3bd7 # v0.15.0
         with:
           enable-cache: "true"
+          # The homelab-ephemeral runner image bakes nix + devbox (homelab FU-015); v0.15.0's
+          # experimental installer exits 1 when nix is already present (#166).
+          skip-nix-installation: "true"
       - name: devbox run ci
         run: devbox run ci
