@@ -1614,6 +1614,129 @@ def post_touches_block(gh, slug, pr_url, issue):
     print("touches: Touches block appended to %s" % pr_url, flush=True)
 
 
+# ── THE STRONG LINK — one grammar, the READER's (homelab#2063) ─────────────────────────────────
+# The homelab scan's issue-label lifecycle (`agents/coordinator-scan.sh`: the review-flip belt that
+# releases an issue at PR-open, and the C6 merged-closeout that closes it at merge) connects a PR
+# to an issue by a STRONG link in the PR BODY — a closing keyword or `implements` in front of
+# `#N`, or the line-anchored `Issue:` trailer (`docs/agents/issue-authoring.md` §A child cannot
+# close itself). A bare `#N` or `Refs #N` is a weak mention: it HOLDS an issue (the safe failure
+# direction), it never releases or closes it. Below is that grammar, copied from the scan's jq
+# regexes character for character — jq's "i" flag ⇔ re.IGNORECASE, and both fold `[^a-z]` too:
+#   (^|[^a-z])(implements|closes|close[ds]?|fixe[ds]?|fix|resolve[ds]?)[ \t]+#N\b
+#   (?m)^[ \t]*issue:[ \t]*#N\b
+# One parser (ADR-122): the guarantee tests presence with THIS grammar, so the only question it
+# answers is the one the scan will ask. `parse_strong_link` below is the narrower WRITER grammar —
+# the two forms finalize itself emits — and stays the label flip's, whose question is "which issue
+# did this ride make strong", not "is #N linked".
+STRONG_LINK_KEYWORDS = r"(?:implements|closes|close[ds]?|fixe[ds]?|fix|resolve[ds]?)"
+
+
+def strong_link_for(body, issue):
+    """Does `body` carry a STRONG link to issue N, by exactly the grammar the homelab scan reads?
+
+    True for `Fixes #N`, `closes #N`, `Implements #N`, `resolved #N` (any case, the keyword
+    starting a word, one-or-more blanks, the WHOLE number) and for a line `Issue: #N`. False for
+    `Refs #N`, a bare `#N`, `#N` bleeding into `#N0`, or a keyword glued to a letter
+    (`prefixes #N`). An empty body or a non-numeric issue is False — there is nothing to match."""
+    if not body or not str(issue).isdigit():
+        return False
+    n = str(issue)
+    keyword = re.compile(r"(?:^|[^a-z])%s[ \t]+#%s\b" % (STRONG_LINK_KEYWORDS, n), re.IGNORECASE)
+    trailer = re.compile(r"^[ \t]*issue:[ \t]*#%s\b" % n, re.IGNORECASE | re.MULTILINE)
+    return bool(keyword.search(body) or trailer.search(body))
+
+
+def ensure_strong_link(gh, slug, pr_url, issue, stats):
+    """The #32 guarantee: make the PR body strongly link the ride's issue — REST only.
+
+    The container writes the link because the worker's prose cannot be trusted to (ADR-122):
+    on homelab#2046 (a Renovate `major` PR the un-armed-major play dispatched a worker ONTO with
+    carrier issue #2063) the worker wrote `Refs #2063` into its COMMIT message and nothing into
+    the PR body Renovate authored — a weak link the lifecycle never reads, so #2063 would have
+    stayed open past the merge.
+
+    WHY REST (the live loss, 2026-09-28 09:57Z, pod agent-homelab-issue-2063-r1): the guarantee
+    already existed and failed — `gh pr view`/`gh pr edit` are GraphQL, and every GraphQL call in
+    that finalize died on `GraphQL: API rate limit already exceeded for installation ID …`, the
+    App installation's GraphQL pool drained by the worker's own `gh pr checks`/`gh pr list` calls
+    inside the ride. The ADR-103 summary line on the SAME ride landed, because
+    `post_summary_event` is REST-only. REST is a separate pool, so this write now rides it end to
+    end: the PR object (`repos/{slug}/pulls/{n}` — body AND base in one read), the #107 PR-number
+    probe, the default branch (`repos/{slug}`), and the body PATCH.
+
+    What it writes (unchanged from #32/#107): `Fixes #N` when the PR's base IS the default branch
+    (GitHub closes the issue at merge — intended), `Implements #N` otherwise (a closing keyword is
+    inert off the default branch, and on a `goal/**` base the goal lane owns closure). Prepended,
+    never rewriting the rest; closing keywords aimed at PRs are rewritten to `Refs` first (#107,
+    one PR-number probe per distinct number, #112). Presence is tested with the READER's grammar
+    (`strong_link_for`), so a body that already strongly links #N in ANY form the scan accepts is
+    left byte-identical and NO write is issued — idempotent across rounds. One PATCH carries both
+    edits. Best-effort like every leg: an unreadable read or a refused write is a stderr line and
+    a normal return (the scan holds the issue; a human sees the hold). Sets
+    `issue_link_added_by_pod` only when the link write LANDED."""
+    n = _pr_number(pr_url)
+    if not (slug and n and str(issue).isdigit()):
+        return
+    pulls = "repos/%s/pulls/%s" % (slug, n)
+    cur = gh("api", pulls)
+    if cur.returncode != 0:
+        print("bookkeeping: issue-link read FAILED: %s (scan may re-dispatch %s#%s)"
+              % (cur.stderr.strip()[-160:], slug, issue), file=sys.stderr)
+        return
+    try:
+        pr = json.loads(cur.stdout)
+    except ValueError:
+        pr = None
+    if not isinstance(pr, dict):
+        # rc 0 with a non-object payload (a proxy page, a truncated stream) is no reading at all —
+        # never "the body is empty", which would prepend onto a body this code never saw.
+        print("bookkeeping: issue-link read UNREADABLE (not a PR object) — left alone (scan may "
+              "re-dispatch %s#%s)" % (slug, issue), file=sys.stderr)
+        return
+    body = pr.get("body") or ""
+    base = (pr.get("base") or {}).get("ref") or ""
+    # ── Fix 1 (#107): a closing keyword aimed at a PR is never intended → `Refs #N` ──
+    pr_cache = {}
+
+    def _rewrite_pr_closer(m):
+        num = m.group(2)
+        if num not in pr_cache:
+            probe = gh("api", "repos/%s/pulls/%s" % (slug, num), "--jq", ".number", timeout=10)
+            pr_cache[num] = probe.returncode == 0 and bool(probe.stdout.strip())
+        if pr_cache[num]:
+            print("bookkeeping: closing keyword '%s #%s' targets a PR — rewriting to 'Refs #%s'"
+                  % (m.group(1), num, num), flush=True)
+            return "Refs #%s" % num
+        return m.group(0)
+
+    new_body = re.sub(r"\b(fixes|closes|resolves)\s+#(\d+)\b", _rewrite_pr_closer, body,
+                      flags=re.IGNORECASE)
+    # ── Fix 2 (#107): `Fixes` on the default branch, `Implements` everywhere else ──
+    link_keyword = "Implements"
+    if base:
+        default = gh("api", "repos/%s" % slug, "--jq", ".default_branch")
+        if default.returncode == 0 and default.stdout.strip() == base:
+            link_keyword = "Fixes"
+    added = False
+    if strong_link_for(new_body, issue):
+        print("bookkeeping: issue link already present (#%s) — left alone" % issue, flush=True)
+    else:
+        new_body = "%s #%s\n\n%s" % (link_keyword, issue, new_body)
+        added = True
+    if new_body == body:
+        return
+    ed = gh("api", "--method", "PATCH", pulls, "--input", "-",
+            stdin=json.dumps({"body": new_body}))
+    if ed.returncode != 0:
+        print("bookkeeping: issue-link edit FAILED: %s (scan may re-dispatch %s#%s)"
+              % (ed.stderr.strip()[-160:], slug, issue), file=sys.stderr)
+        return
+    if added:
+        print("bookkeeping: issue link ADDED (%s #%s) — the PR body did not strongly name its "
+              "issue" % (link_keyword, issue), flush=True)
+        stats["issue_link_added_by_pod"] = True
+
+
 # ── homelab#501 worker half (#73): the deterministic PR-open label flip ────────────────────────
 # At PR-open, beside arming auto-merge, flip the source issue out of `agent/in-progress` and into
 # `agent/review` — the deterministic lifecycle edge: today NOTHING writes `agent/review`; it happens
@@ -1826,85 +1949,28 @@ def bookkeeping(stats, log_path):
                     print("bookkeeping: arm FAILED: %s (launcher/reflex re-arms)"
                           % armed.stderr.strip()[-200:], file=sys.stderr)
             # ── GUARANTEE THE ISSUE LINK (#32) ────────────────────────────────────────────────
-            # The coordinator scan links a PR to its issue by TEXT — `#<n>` anywhere in the body —
-            # not by GitHub's closing references, because a PR based on a non-default branch has
-            # none. An in-progress issue with no open PR body matching `#<n>` reads as "worker
-            # terminal, no PR" and gets RE-DISPATCHED onto finished work.
+            # The coordinator scan links a PR to its issue by TEXT in the PR body — not by GitHub's
+            # closing references, because a PR based on a non-default branch has none — and its
+            # lifecycle belts key on a STRONG link (`strong_link_for`'s grammar, the scan's own).
+            # An in-progress issue with no open PR strongly naming it reads as "worker terminal,
+            # no PR" and gets RE-DISPATCHED onto finished work; a merged PR that merely mentions it
+            # leaves it OPEN forever (homelab#2063 on Renovate PR #2046: `Refs #2063` in the
+            # worker's COMMIT, nothing in the body Renovate authored).
             # Recipes are the wrong place for this: fix.yaml asks for it, build.yaml does not (in
-            # both repos that have one), and a rule a model can forget is advice, not mechanism.
+            # both repos that have one), and a rule a model can forget is advice, not mechanism
+            # (ADR-122 — the container writes the disposition, one parser reads it).
             # Cost of forgetting it live (circles#30/#36, 2026-08-06): a duplicate ride onto merged
             # work, plus a goal child that could never close — homelab FU-143's soak failed on
             # exactly this, and the scan now has to HOLD such issues because it cannot tell
             # merged-but-unlinked from abandoned.
-            # ⚖ `Fixes` on default-branch PRs, `Implements` on `goal/**` bases: on a
-            # default-branch PR, `Fixes` closes the issue on merge — intended. On a `goal/**`
-            # base, `Implements` is inert; the goal lane still owns closure and the FU-143
-            # merged-closeout does it. This line exists to satisfy the scan's regex, NOT to
-            # change what merging does.
-            # ⚖ Match, do not duplicate; prepend, do not rewrite; never fatal.
-            # ── CLOSING-KEYWORD LINT (#107) ──────────────────────────────────────────────────
-            # Two belts, one site:
-            #   1. `fixes|closes|resolves #N` where #N resolves to a PR → rewrite to `Refs #N`.
-            #      A closing keyword aimed at a PR is never intended (oracle-fleet#317).
-            #   2. On a default-branch-based PR, use `Fixes` (not `Implements`) for the issue
-            #      link — closing keywords are inert off the default branch, so `Fixes` is safe
-            #      universally (oracle-fleet#312).
+            # ⚖ `Fixes` on default-branch PRs, `Implements` on `goal/**` bases (#107); closing
+            # keywords aimed at PRs → `Refs` (#107/#112). ⚖ Match by the READER's grammar, do not
+            # duplicate; prepend, do not rewrite; REST only (homelab#2063 — GraphQL shares the
+            # installation pool the ride just drained); never fatal. All in `ensure_strong_link`.
             if task.startswith("issue-") and slug:
                 _issue = task[len("issue-"):]
                 try:
-                    _cur = gh("pr", "view", pr_url, "--json", "body", "--jq", ".body")
-                    if _cur.returncode != 0:
-                        print("bookkeeping: issue-link read FAILED: %s (scan may re-dispatch %s#%s)"
-                              % (_cur.stderr.strip()[-160:], slug, _issue), file=sys.stderr)
-                    else:
-                        _body = _cur.stdout
-                        # ── Fix 1 (#107): rewrite closing keywords aimed at PRs ──
-                        _pr_cache = {}
-                        def _rewrite_pr_closer(m):
-                            num = m.group(2)
-                            if num not in _pr_cache:
-                                r = gh("pr", "view", num, "--repo", slug,
-                                       "--json", "number", "--jq", ".number", timeout=10)
-                                _pr_cache[num] = r.returncode == 0 and r.stdout.strip()
-                            if _pr_cache[num]:
-                                print("bookkeeping: closing keyword '%s #%s' targets a PR — "
-                                      "rewriting to 'Refs #%s'"
-                                      % (m.group(1), num, num), flush=True)
-                                return "Refs #%s" % num
-                            return m.group(0)
-                        _body = re.sub(
-                            r"\b(fixes|closes|resolves)\s+#(\d+)\b",
-                            _rewrite_pr_closer, _body, flags=re.IGNORECASE
-                        )
-                        if _body != _cur.stdout:
-                            _ed = gh("pr", "edit", pr_url, "--body", _body)
-                            if _ed.returncode != 0:
-                                print("bookkeeping: closing-keyword rewrite edit FAILED: %s"
-                                      % _ed.stderr.strip()[-160:], file=sys.stderr)
-                        # ── Fix 2 (#107): use Fixes on default-branch PRs ──
-                        _link_keyword = "Implements"
-                        _pr_info = gh("pr", "view", pr_url, "--json",
-                                       "baseRefName", "--jq", ".baseRefName")
-                        if _pr_info.returncode == 0:
-                            _base = _pr_info.stdout.strip()
-                            _default = gh("repo", "view", slug,
-                                          "--json", "defaultBranch", "--jq", ".defaultBranch")
-                            if _default.returncode == 0 and _default.stdout.strip() == _base:
-                                _link_keyword = "Fixes"
-                        if re.search(r"\b(?:Implements|Fixes)\s+#%s\b" % re.escape(_issue), _body):
-                            print("bookkeeping: issue link already present (#%s) — left alone"
-                                  % _issue, flush=True)
-                        else:
-                            _new = "%s #%s\n\n%s" % (_link_keyword, _issue, _body)
-                            _ed = gh("pr", "edit", pr_url, "--body", _new)
-                            if _ed.returncode == 0:
-                                print("bookkeeping: issue link ADDED (%s #%s) — the PR body did "
-                                      "not name its issue" % (_link_keyword, _issue), flush=True)
-                                stats["issue_link_added_by_pod"] = True
-                            else:
-                                print("bookkeeping: issue-link edit FAILED: %s (scan may re-dispatch "
-                                      "%s#%s)" % (_ed.stderr.strip()[-160:], slug, _issue),
-                                      file=sys.stderr)
+                    ensure_strong_link(gh, slug, pr_url, _issue, stats)
                 except Exception as exc:  # never turn a good ride into a failed one
                     print("bookkeeping: issue-link step errored: %r (non-fatal)" % exc,
                           file=sys.stderr)
