@@ -39,6 +39,36 @@ RUN devbox install
 # only on PATH inside `devbox run`.
 ENV PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH
 
+# VERSION SETS (homelab#2014 shape (a), operator ruling 2026-10-10). claude-code and kubectl are
+# members of sets that must agree across the worker (this image), the coordinator/reviewer
+# (agent-coordinator) and the seat — and kubectl must stay bounded to the fleet's Kubernetes minor,
+# which this repo's `kubectl@latest` is not. Both therefore come from ONE homelab file,
+# `version-sets/devbox.lock` (stamped by the same weekly devbox-update pass that re-resolves
+# agent-base/devbox.lock): its exact flake refs are built (claude-code is unfree, so not in the
+# binary cache — devbox builds it the same way) and must land on the stamp's store paths (no
+# re-resolution — the devbox search index is not consulted), then are linked into a version-set bin dir
+# that SHADOWS the harness profile. The build passes CLAUDE_CODE_VERSION / KUBECTL_VERSION as ARGs
+# (build-image.yaml sparse-fetches the stamp); the realised binaries must report them. An EMPTY ARG
+# is filled from the same stamp (the ADD), so ci.yaml and a bare build are pinned too.
+ARG CLAUDE_CODE_VERSION=""
+ARG KUBECTL_VERSION=""
+ADD --chown=devbox:devbox https://raw.githubusercontent.com/teststuffstash/homelab/master/version-sets/devbox.lock /opt/agent/version-sets.lock
+RUN set -eu; \
+    export PATH="$PATH:/home/devbox/.nix-profile/bin:/nix/var/nix/profiles/default/bin"; \
+    mkdir -p /opt/agent/version-set/bin; \
+    stamp() { jq -er --arg t "$1" --arg f "$2" '.packages | to_entries[] | select(.key | startswith($t + "@")) | .value | if $f == "ref" then .resolved elif $f == "path" then .systems["x86_64-linux"].store_path else .version end' /opt/agent/version-sets.lock; }; \
+    for t in claude-code kubectl; do \
+      out="$(stamp "$t" path)"; \
+      NIXPKGS_ALLOW_UNFREE=1 nix --extra-experimental-features 'nix-command flakes' build --impure --no-link --print-out-paths "$(stamp "$t" ref)" > /tmp/vs-out; \
+      grep -qxF "$out" /tmp/vs-out; \
+      for b in "$out"/bin/*; do ln -sf "$b" /opt/agent/version-set/bin/; done; \
+    done; \
+    cc="${CLAUDE_CODE_VERSION:-$(stamp claude-code version)}"; kc="${KUBECTL_VERSION:-$(stamp kubectl version)}"; \
+    /opt/agent/version-set/bin/claude --version | grep -qF "$cc"; \
+    /opt/agent/version-set/bin/kubectl version --client | grep -qF "v${kc#v}"; \
+    echo "version set: claude-code $cc, kubectl ${kc#v}"
+ENV PATH=/opt/agent/version-set/bin:$PATH
+
 USER root
 COPY agent-base/entrypoint.sh /usr/local/bin/agent-entrypoint
 COPY agent-base/agent-finalize /usr/local/bin/agent-finalize
@@ -47,7 +77,7 @@ COPY agent-base/agent-codex /usr/local/bin/agent-codex
 RUN chmod +x /usr/local/bin/agent-entrypoint /usr/local/bin/agent-finalize /usr/local/bin/agent-storm-watchdog /usr/local/bin/agent-codex
 # Login shells (bash -l) re-read /etc/profile and would drop the harness bin from PATH; re-add it so
 # interactive sessions and recipes find goose/opencode regardless of shell type.
-RUN printf 'export PATH=/opt/agent/.devbox/nix/profile/default/bin:$PATH\n' > /etc/profile.d/agent-path.sh
+RUN printf 'export PATH=/opt/agent/version-set/bin:/opt/agent/.devbox/nix/profile/default/bin:$PATH\n' > /etc/profile.d/agent-path.sh
 
 # Pre-seed the claude harness (homelab FU-066): a headless `claude -p` in a fresh pod would otherwise
 # stop on the onboarding wizard, the /work/repo trust dialog, or the bypass-permissions warning — the
