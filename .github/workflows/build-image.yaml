@@ -23,6 +23,11 @@ on:
   # rolls out and the cluster pin can revert (agents/images.env + kustomization newTag).
   schedule:
     - cron: "0 6 * * 1" # Monday 06:00 UTC
+  # THE VERSION-SET DEPLOY EDGE (homelab#2014): homelab's version-sets-dispatch.yaml fires this when
+  # version-sets/devbox.lock changes on master, so a new stamp rebuilds every consumer and the
+  # existing deploy-pin chain rolls it — no waiting for the Monday cron.
+  repository_dispatch:
+    types: [version-sets]
 
 jobs:
   image:
@@ -65,9 +70,33 @@ jobs:
       # job's success is what deploy-pin waits on — so the gate means exactly "the load-bearing
       # artifact shipped". That tag is what homelab agents/images.env pins, so it is the only one
       # any worker pod actually pulls.
+      # The version-set stamp (homelab#2014): sparse-fetch homelab master's version-sets/devbox.lock
+      # (the pin-only-lint shape) and pass its members as build ARGs — the Dockerfile asserts the
+      # installed binaries report them. The Dockerfile's ADD fallback covers an ARG-less build.
+      - name: Fetch homelab's version-set stamp at master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: teststuffstash/homelab
+          ref: master
+          path: .homelab-version-sets
+          sparse-checkout: |
+            version-sets/devbox.lock
+          sparse-checkout-cone-mode: false
+      - name: Read the version set
+        id: vs
+        run: |
+          L=.homelab-version-sets/version-sets/devbox.lock
+          # python3, not jq: the slim ARC runner image does not guarantee jq (renovate-approve.reusable.yml)
+          v() { python3 -c "import json,sys;print(next(p['version'] for k,p in json.load(open(sys.argv[1]))['packages'].items() if k.startswith(sys.argv[2]+'@')))" "$L" "$1"; }
+          echo "claude_code=$(v claude-code)" >> "$GITHUB_OUTPUT"
+          echo "kubectl=v$(v kubectl)" >> "$GITHUB_OUTPUT"
+          echo "version set: claude-code $(v claude-code), kubectl $(v kubectl)"
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
+          build-args: |
+            CLAUDE_CODE_VERSION=${{ steps.vs.outputs.claude_code }}
+            KUBECTL_VERSION=${{ steps.vs.outputs.kubectl }}
           file: agent-base/Dockerfile
           platforms: linux/amd64
           push: true
