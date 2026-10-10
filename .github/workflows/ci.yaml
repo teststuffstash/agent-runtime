@@ -26,7 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # The carved-out dep-bump lane's replacement owner (CODEOWNERS un-owns
-      # agent-base/devbox.{json,lock}; this asserts such a PR is a pure version/hash diff).
+      # agent-base/devbox.{json,lock}; such a PR is a pure version/hash diff, or also touches an
+      # owned path so the code owner reads it — mixed with un-owned paths it is refused; #169).
       # gh comes baked in the ARC runner image (homelab docker/arc-runner/).
       - name: deps-pin-guard (carved-out dep lane)
         if: github.event_name == 'pull_request'
