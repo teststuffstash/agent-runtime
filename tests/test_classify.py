@@ -4,6 +4,7 @@ This is the function the ledger, the model-strike machinery and the router all k
 verdict here is not cosmetic: it decides whether a model gets struck and whether the coordinator
 re-dispatches. Every case below is drawn from a run that actually happened; the docstrings name it.
 """
+import pytest
 TRUNCATION_LOG = (
     "reading the spec\n"
     "-32602: Could not interpret tool use parameters for id chatcmpl-tool-9da57cd:\n"
@@ -564,3 +565,88 @@ class TestInputUnreadable:
 
 
 
+
+
+# ── homelab retro r7 F5 / agent-runtime#164 — the classifier as a decision table ────────────────
+#
+# oracle-fleet#778 round 1 (2026-10-03T12:55:38Z) emitted `error_class=http-403-storm` for what the
+# operator's platform note 15 minutes later named as a node egress-policy drop: the pod sent TCP
+# SYNs to `192.168.40.31:443` (the mcr.microsoft.com pull-through mirror, which serves plain HTTP
+# on :80) and the policy dropped them (`POLICY_DENIED`). The taxonomy folded a NETWORK fault into
+# the HTTP-403 bucket, so the strike swapped the MODEL (deepseek → haiku) for an infra fault, the
+# retro bundle's `infra_failure_events` read 0 for a week containing a real infra fault, and the
+# fleet-fault STRIKE channel could only fire on the class by misclassifying it twice.
+#
+# The fix is one arm, `egress-denied`, matched on POLICY_DENIED / connection-refused / SYN-timeout
+# evidence BEFORE the HTTP-status fallback and routed to the infra class (`infra-failure`) rather
+# than auth (`auth-storm`). The auth arms are unchanged.
+#
+# The table below is the acceptance: one row per evidence shape. The three egress rows are RED on
+# base (the POLICY_DENIED row folds into http-403-storm; the other two fall through to no-output)
+# and GREEN after the fix; every other row is unchanged.
+ORACLE_FLEET_778_LOG = (
+    # The operator's note on oracle-fleet#778, as the round's log carries it, plus the 403 storm
+    # the misclassification surfaced as. On base the 403s win (auth-storm/http-403-storm); the
+    # egress arm must outrank them.
+    "POLICY_DENIED: 192.168.40.31:443 (mcr.microsoft.com pull-through mirror, HTTP-only on :80)\n"
+    "403 forbidden\n" * 5
+)
+
+# (name, log, expected (exit_status, error_class) or None) — fed to failure_signature().
+SIGNATURE_DECISION_TABLE = [
+    ("403 storm", "403 forbidden\n" * 5, ("auth-storm", "http-403-storm")),
+    ("401 storm", "401 unauthorized\n" * 5, ("auth-storm", "http-401-storm")),
+    ("budget 403 key", "key limit exceeded\n", ("budget-403", "budget-exhausted-key")),
+    ("POLICY_DENIED", ORACLE_FLEET_778_LOG, ("infra-failure", "egress-denied")),
+    ("connection refused",
+     "dial tcp 192.168.40.31:443: connect: connection refused\n",
+     ("infra-failure", "egress-denied")),
+    ("SYN timeout to a private IP",
+     "dial tcp 192.168.40.31:443: i/o timeout\n",
+     ("infra-failure", "egress-denied")),
+    ("timeout", "context deadline exceeded\n", ("timeout", "timeout")),
+    ("harness death", "thread 'main' panicked at src/x.rs\n", ("harness-death", "goose-panic")),
+    ("goose 32602", TRUNCATION_LOG, ("harness-death", "goose-32602-truncation")),
+    ("unknown", "nothing recognizable in this log\n", None),
+]
+
+# (name, log, stats, env, expected) — fed to classify() end to end.
+CLASSIFY_DECISION_TABLE = [
+    ("no-output", "nothing useful\n", {}, {"AGENT_TASK": "issue-7"}, ("failed", "no-output")),
+    # The #36 direction: an inherited PR must not mask the egress death.
+    ("egress outranks an inherited PR", ORACLE_FLEET_778_LOG, {"pr_url": "http://x/778"},
+     {"AGENT_TASK": "issue-778"}, ("infra-failure", "egress-denied")),
+]
+
+
+class TestDecisionTable:
+    """The classifier as a decision table — one row per evidence shape (agent-runtime#164)."""
+
+    @pytest.mark.parametrize("name,log,expected", SIGNATURE_DECISION_TABLE,
+                             ids=[row[0] for row in SIGNATURE_DECISION_TABLE])
+    def test_signature_decision_table(self, af, name, log, expected):
+        assert af.failure_signature(log, harness="goose") == expected
+
+    @pytest.mark.parametrize("name,log,stats,env,expected", CLASSIFY_DECISION_TABLE,
+                             ids=[row[0] for row in CLASSIFY_DECISION_TABLE])
+    def test_classify_decision_table(self, af, logfile, monkeypatch, name, log, stats, env,
+                                     expected):
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert af.classify(logfile(log), dict(stats)) == expected
+
+    def test_egress_outranks_the_http_status_fallback(self, af):
+        """The ordering the issue names: POLICY_DENIED + a 403 storm is egress, not auth."""
+        assert af.failure_signature(ORACLE_FLEET_778_LOG, harness="goose") == (
+            "infra-failure", "egress-denied")
+
+    def test_the_auth_arms_are_unchanged(self, af):
+        """No change to the auth arms: a pure 403/401 storm still classifies as auth-storm."""
+        assert af.failure_signature("403 forbidden\n" * 5, harness="goose") == (
+            "auth-storm", "http-403-storm")
+        assert af.failure_signature("401 unauthorized\n" * 5, harness="goose") == (
+            "auth-storm", "http-401-storm")
+
+    def test_infra_failure_is_a_death_class(self, af):
+        """`infra-failure` must be in DEATH_EXIT_STATUSES so bookkeeping strikes, not arms."""
+        assert "infra-failure" in af.DEATH_EXIT_STATUSES

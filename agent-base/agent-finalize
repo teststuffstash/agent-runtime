@@ -423,6 +423,23 @@ _BUDGET_RESIDUAL_RE = r"insufficient quota|require[sd]? more credit|quota exceed
 # and the source guard below.
 _BUDGET_ALL_RE = _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESIDUAL_RE
 
+# homelab retro r7 F5 / agent-runtime#164: a node egress-policy drop is a NETWORK fault, not an auth
+# failure. oracle-fleet#778 r1 (2026-10-03T12:55:38Z) sent TCP SYNs to 192.168.40.31:443 (the
+# mcr.microsoft.com pull-through mirror, which serves plain HTTP on :80); the policy dropped them
+# (`POLICY_DENIED`) and the retry storm surfaced as repeated 403s, so the taxonomy folded the fault
+# into the HTTP-403 bucket and struck the MODEL for an infra fault. Matched BEFORE the HTTP-status
+# fallback and routed to the infra class (`infra-failure`), so the model router is not told to swap
+# and the platform's `AgentWorkerEgressDropped` alert owns the fault. Three evidence shapes: the
+# Cilium drop reason, a refused connection, and a SYN timeout whose destination is RFC1918 (the
+# mirror is a private IP; a public-host timeout stays the generic `timeout` class).
+_EGRESS_DENIED_RE = (
+    r"POLICY_DENIED"
+    r"|connection refused"
+    r"|(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})"
+    r"[^\n]*(?:i/o timeout|connection timed out|timed out)"
+)
+
 # This file's own pattern source, recognised so the budget family cannot match it (#136). Three
 # shapes, each pattern text rather than a provider message: a line naming one of the constants above
 # (their definitions, or the join in _carry_budget_match), a line quoting a regex alternation (a
@@ -672,6 +689,11 @@ def failure_signature(text, ci_passed=None, watchdog="", harness="", ride_diff="
     `goose-32602-truncation` because its own summary text named the class. An empty harness
     (older callers, tests) keeps the goose behaviour.
 
+    An egress-policy drop (POLICY_DENIED / connection-refused / SYN-timeout to a private IP) is its
+    own infra class, `infra-failure`/`egress-denied`, matched BEFORE the HTTP-status fallback so a
+    network fault the drop surfaced as a 403 storm never strikes the model as auth (agent-runtime#164,
+    homelab retro r7 F5).
+
     Budget-403 is split into three sub-classes (#85): account-credit (budget-exhausted-account),
     per-key-limit (budget-exhausted-key), and residual (http-403-other). The patterns are defined
     once in the module-level _BUDGET_*_RE constants, shared with _carry_budget_match (#91), and are
@@ -708,6 +730,11 @@ def failure_signature(text, ci_passed=None, watchdog="", harness="", ride_diff="
     # infra failure is never counted as a completed round. Outranks truncation/auth-storm
     # because a directive read failure dooms the round before any work can begin.
     ratelimit = n(r"GraphQL:\s*API rate limit|API rate limit.*installation ID")
+    # homelab retro r7 F5 / agent-runtime#164: a node egress-policy drop (POLICY_DENIED /
+    # connection-refused / SYN-timeout to a private IP) is an INFRA fault, not auth. Counted here
+    # and matched BEFORE the HTTP-status fallback below, so a 403 storm the drop surfaced as cannot
+    # fold the network fault into the auth bucket and strike the model.
+    egress = n(_EGRESS_DENIED_RE)
     # `-32602` must be the CODE, not the NAME: a ride whose content (issue body, docs, router
     # tests, its own report) mentions `goose-32602-truncation` or "(goose `-32602`)" is text, not a
     # death — homelab#1705: three false strikes in one afternoon, two of them rides that opened a
@@ -730,6 +757,10 @@ def failure_signature(text, ci_passed=None, watchdog="", harness="", ride_diff="
         return "input-unreadable", "rate-limit"
     if gitauth and ci_passed is True:
         return "no-artifact", "token-expiry"  # green work, dead git token at push/PR time
+    if egress:
+        # Before the HTTP-status fallback on purpose: the drop surfaces as a 403 storm, and the
+        # auth bucket would swap the model for a network fault (oracle-fleet#778 r1).
+        return "infra-failure", "egress-denied"
     if auth >= 5:
         return "auth-storm", "http-403-storm" if forbidden >= auth - forbidden else "http-401-storm"
     if watchdog == "repetition-loop":
@@ -787,7 +818,8 @@ def died_this_round(fail, stats):
 # contradicts. `bookkeeping` reads these instead of re-deriving the predicate: by the time it runs,
 # `classify` has already put `died_this_round`'s answer into `stats["exit_status"]`, and re-running
 # the signature match over the log there would be a second place for the two to disagree.
-DEATH_EXIT_STATUSES = ("harness-death", "auth-storm", "budget-403", "timeout", "input-unreadable")
+DEATH_EXIT_STATUSES = ("harness-death", "auth-storm", "budget-403", "timeout", "input-unreadable",
+                       "infra-failure")
 
 
 def bookkeeping_route(stats):
@@ -820,7 +852,7 @@ def bookkeeping_route(stats):
 def classify(log_path, stats):
     """Classify the run into (exit_status, error_class) — the FU-057 enabler.
 
-    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | input-unreadable | failed
+    exit_status ∈ clean | ci-failed | no-artifact | harness-death | auth-storm | budget-403 | timeout | blocked-deliberate | input-unreadable | infra-failure | failed
     error_class = the dominant machine-detectable cause ('' when clean). Derived from run.log
     patterns + the run's OUTCOME (did it open a PR / pass CI). This is what makes the model-blacklist
     call possible (docs/agents/observability-and-retro.md §B1): the ledger needs to know *why* a run
