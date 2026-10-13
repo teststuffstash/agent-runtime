@@ -118,6 +118,21 @@ class TestFailureSignatures:
         s, e = af.classify(logfile("requires more credit\n"), {})
         assert (s, e) == ("budget-403", "http-403-other")
 
+    def test_budget_residual_goose_add_more_credits(self, af, logfile, monkeypatch):
+        """homelab issue-2308 r1 (2026-10-06, retro r8 F3): goose renders ANY provider 402 as one
+        line — `add more credits` — with no code, envelope or URL, so a per-session key at its cap
+        and an empty account are indistinguishable on it: the residual arm by definition. Goose then
+        forces the recipe's `final_output`, the contract JSON parses, and this used to read
+        `blocked-deliberate` — no strike, no key retry, a phantom the seat requeued by hand."""
+        monkeypatch.setenv("AGENT_TASK", "issue-2308")
+        log = ("RC 0\n"
+               "warning: Please check your account with your provider to add more credits, "
+               "then resend your message to continue.\n"
+               "You MUST call the `final_output` tool NOW with the final output for the user. \n")
+        s, e = af.classify(logfile(log),
+                           {"harness": "goose", "ci_passed": False, "branch": "agent/20261006-101245"})
+        assert (s, e) == ("budget-403", "http-403-other")
+
     def test_budget_403_still_death_status(self, af, af_source):
         """DEATH_EXIT_STATUSES must still contain budget-403 — unchanged contract."""
         assert "budget-403" in af.DEATH_EXIT_STATUSES

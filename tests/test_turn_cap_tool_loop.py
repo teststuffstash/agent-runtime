@@ -84,6 +84,70 @@ class TestTurnCapDetection:
         assert (s, e) == ("clean", "")
 
 
+# homelab retro r8 F3 (docs/agents/retros/2026-10-12-platform-r8-opus.md): issue-2286 r1, 2026-10-06
+# 08:47Z and 09:14Z — the last lines before goose's own final_output box, verbatim.
+OUTPUT_CAP_LOG = (
+    "Created /work/repo/agents/replay/fixtures/janitor-run-cmd-surfaces/fixture.yaml (35 lines)\n"
+    "Warning: Response reached the model's output-token limit and may be incomplete.\n"
+    "You MUST call the `final_output` tool NOW with the final output for the user. \n"
+    "  ────────────────────────────────────────\n"
+    "  ▸ final_output recipe\n"
+    "    ci_passed: false\n"
+    "    branch: agent/20261006-084414\n"
+)
+# The report goose FORCED out of the model: parse_outcome lifts it into stats exactly like a
+# worker's own, so the pair above is the only thing that tells a cap from a decision.
+FORCED_REPORT = {"harness": "goose", "ci_passed": False, "branch": "agent/20261006-084414"}
+
+
+class TestOutputTokenCap:
+    """homelab retro r8 F3: a goose ride that hit the model's per-response output-token cap is a
+    cap death (`turn-cap`), not a deliberate stop. Six of the window's eight `worker-stop-report`
+    entries were this shape; each cost a seat requeue because the class never struck."""
+
+    def test_output_cap_with_forced_report_is_turn_cap_not_deliberate(self, af, logfile, tmp_path,
+                                                                        monkeypatch):
+        """issue-2286 r1: forced `final_output` parsed, no PR, exit 0 — used to read blocked-deliberate."""
+        monkeypatch.setenv("AGENT_TASK", "issue-2286")
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            s, e = af.classify(logfile(OUTPUT_CAP_LOG), dict(FORCED_REPORT))
+        assert (s, e) == ("harness-death", "turn-cap")
+
+    def test_output_cap_phrase_in_quoted_content_is_not_a_death(self, af, logfile, monkeypatch):
+        """issue-2286 r1 (09:14Z) carried the coordinator's own comments about the cap in its context;
+        the phrase without goose's forced-call line is text (homelab#1705's content-echo class)."""
+        monkeypatch.setenv("AGENT_TASK", "issue-2286")
+        log = (
+            "- `2026-10-06T09:01:45Z` · Two consecutive rides truncated at the model's response "
+            "OUTPUT-token cap on the router's cheap-tier pick\n"
+            "  Warning: Response reached the model's output-token limit — the coordinator quoted it\n"
+            "Now implementing the fix.\n"
+        )
+        s, e = af.classify(logfile(log), {"harness": "goose", "root_cause": "spec is ambiguous"})
+        assert (s, e) == ("blocked-deliberate", "worker-stop-report")
+
+    def test_output_cap_is_goose_only(self, af, logfile, monkeypatch):
+        """`final_output` is goose's recipe tool; a claude ride cannot die of goose's pair."""
+        monkeypatch.setenv("AGENT_TASK", "issue-2286")
+        s, e = af.classify(logfile(OUTPUT_CAP_LOG), {"harness": "claude", "ci_passed": False})
+        assert (s, e) != ("harness-death", "turn-cap")
+
+    def test_budget_outranks_the_output_cap(self, af, logfile, tmp_path):
+        """A dead key dooms the run; the cap is only how it ended (failure_signature's precedence)."""
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(tmp_path)}):
+            s, e = af.classify(logfile("key limit exceeded\n" + OUTPUT_CAP_LOG), dict(FORCED_REPORT))
+        assert (s, e) == ("budget-403", "budget-exhausted-key")
+
+    def test_output_cap_in_the_rides_own_diff_is_not_a_death(self, af, logfile, monkeypatch):
+        """#140's rule applied to the pair: a ride authoring a fixture that quotes it (this repo's
+        tests, homelab's replay rows) carries the lines in its diff — its own text, not goose's."""
+        monkeypatch.setenv("AGENT_TASK", "issue-2286")
+        diff = "".join("+" + l + "\n" for l in OUTPUT_CAP_LOG.splitlines())
+        monkeypatch.setattr(af, "_ride_diff_text", lambda: diff)
+        s, e = af.classify(logfile(OUTPUT_CAP_LOG), {"harness": "goose", "root_cause": "partial"})
+        assert (s, e) == ("blocked-deliberate", "worker-stop-report")
+
+
 class TestToolLoopDetection:
     """tool-loop = cap death with zero tool-result progress."""
 
