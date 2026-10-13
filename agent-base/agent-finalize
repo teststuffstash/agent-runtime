@@ -418,7 +418,13 @@ _BUDGET_ACCOUNT_RE = (
     r"[^\n]*?(?:" + _BUDGET_ACCOUNT_PHRASE_RE + r")"
 )
 _BUDGET_KEY_RE = r"key limit exceeded"
-_BUDGET_RESIDUAL_RE = r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
+# `check your account with your provider to add more credits` is goose's rendering of ANY provider
+# 402 (homelab issue-2308 r1, 2026-10-06 — retro r8 F3): one line, no code, no envelope, no URL, so
+# a per-session key at its cap and an empty account are indistinguishable on it — the residual arm
+# by definition, exactly like OpenRouter's own `requires more credits`. Goose then forces the
+# recipe's `final_output`, the contract JSON parses, and the run used to read `blocked-deliberate`.
+_BUDGET_RESIDUAL_RE = (r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
+                       r"|check your account with your provider to add more credits")
 # The three joined, defined once for the two consumers that want "any budget arm": the carry (#91)
 # and the source guard below.
 _BUDGET_ALL_RE = _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESIDUAL_RE
@@ -592,6 +598,22 @@ def _goose_cap_reached(text):
     ) is not None
 
 
+def _goose_output_cap_reached(text):
+    """Detect goose's forced-final-output pair: the model hit its per-response OUTPUT-token cap and
+    goose ordered the recipe's `final_output` call (homelab retro r8 F3 — 2026-10-06: issue-2286 r1
+    twice, #1897, #1797, #2168). The contract JSON that follows is goose's finish line, not the
+    worker's, so this is a cap death — `turn-cap`, the same family as the turn cap above — and
+    never a deliberate stop. Only goose prints it: `final_output` is the goose recipe tool.
+    Matched as the TWO-line pair at column 0, never the phrase alone — the words ride issue
+    comments a worker reads into its log (issue-2286 r1 quoted a coordinator comment saying
+    "OUTPUT-token cap"), the homelab#1705 content-echo class."""
+    return re.search(
+        r"(?:^|\n)Warning: Response reached the model.s output-token limit[^\n]*\n"
+        r"You MUST call the .final_output. tool NOW",
+        text,
+    ) is not None
+
+
 def _has_tool_result_progress():
     """Check goose session db for tool-result progress. A cap death with zero progress is tool-loop;
     with progress it's just turn-cap. Reads ~/.local/share/goose/sessions/sessions.db (sqlite)."""
@@ -745,6 +767,13 @@ def failure_signature(text, ci_passed=None, watchdog="", harness="", ride_diff="
     if goose_only and _goose_cap_reached(text):
         if not _has_tool_result_progress():
             return "harness-death", "tool-loop"
+        return "harness-death", "turn-cap"
+    # Retro r8 F3: goose's per-response output-token cap, forced into a `final_output` call — the
+    # per-response member of the turn-cap family (no tool-loop split: the loop did not repeat, one
+    # response overflowed). Over budget_text, not text: the log minus this file's source lines and
+    # minus the ride's own diff (#136/#140) — a ride editing the homelab fixture that quotes this
+    # pair must not strike itself with its own authored lines.
+    if goose_only and _goose_output_cap_reached(budget_text):
         return "harness-death", "turn-cap"
     if truncation:
         return "harness-death", "goose-32602-truncation"
