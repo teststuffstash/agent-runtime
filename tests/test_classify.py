@@ -608,6 +608,20 @@ SIGNATURE_DECISION_TABLE = [
     ("harness death", "thread 'main' panicked at src/x.rs\n", ("harness-death", "goose-panic")),
     ("goose 32602", TRUNCATION_LOG, ("harness-death", "goose-32602-truncation")),
     ("unknown", "nothing recognizable in this log\n", None),
+    # ── the #164 round-2 rows (arbitration 2026-10-14) ──────────────────────────────────────────
+    # The egress arm's own vocabulary is not evidence of an egress drop. A ride sent to work on this
+    # classifier READS this file, so its pattern definitions, comments and docstrings arrive in the
+    # run log as text — and the egress vocabulary also appears in plain prose, which
+    # `_BUDGET_SOURCE_RE`'s three shapes do not recognise. At PR head f00c9aaf a single comment line
+    # naming POLICY_DENIED classified an entire log as an egress drop, and a real `-32602`
+    # truncation death carrying an incidental `connection refused` was struck as an infra fault.
+    ("egress vocabulary in prose",
+     "# (`POLICY_DENIED`) and the retry storm surfaced as repeated 403s\n", None),
+    ("truncation death with an incidental connection refused",
+     "-32602: Could not interpret tool use parameters\nconnection refused\n",
+     ("harness-death", "goose-32602-truncation")),
+    ("ECONNREFUSED dial", "connect ECONNREFUSED 10.0.0.1:443\n",
+     ("infra-failure", "egress-denied")),
 ]
 
 # (name, log, stats, env, expected) — fed to classify() end to end.
@@ -650,3 +664,38 @@ class TestDecisionTable:
     def test_infra_failure_is_a_death_class(self, af):
         """`infra-failure` must be in DEATH_EXIT_STATUSES so bookkeeping strikes, not arms."""
         assert "infra-failure" in af.DEATH_EXIT_STATUSES
+
+    def test_this_files_own_source_is_not_egress_evidence(self, af, af_source):
+        """A log built from THIS file's own source must not classify as an egress drop.
+
+        The reviewer's row: a ride sent to fix this classifier reads it, so the egress arm's own
+        comment, docstring and pattern-definition lines land in the run log verbatim. Those lines
+        name `POLICY_DENIED` and `connection refused` in plain prose, which the budget family's
+        `_BUDGET_SOURCE_RE` shapes do not recognise — so at PR head f00c9aaf the file struck itself
+        as an infra egress fault. Derived from the source rather than hardcoded, so the row cannot
+        drift away from the lines that actually strike.
+        """
+        log = "\n".join(
+            l for l in af_source.splitlines()
+            if "POLICY_DENIED" in l or "connection refused" in l or "ECONNREFUSED" in l
+        )
+        assert log, "the egress vocabulary must appear in this file's own source"
+        assert af.failure_signature(log + "\n", harness="goose") != (
+            "infra-failure", "egress-denied"), \
+            "this file's own source is not evidence of an egress drop"
+
+    def test_a_truncation_death_survives_an_incidental_connection_refused(self, af):
+        """A real `-32602` truncation death must stay `goose-32602-truncation`.
+
+        The egress arm outranks truncation by design (a drop surfaces as a 403 storm), so a loose
+        `connection refused` alternation let any incidental mention of the phrase — a test's own
+        output, a docstring — reclassify a harness death as an infra fault.
+        """
+        assert af.failure_signature(
+            "-32602: Could not interpret tool use parameters\nconnection refused\n",
+            harness="goose") == ("harness-death", "goose-32602-truncation")
+
+    def test_the_dial_shape_is_egress_evidence(self, af):
+        """The tightened alternation must still catch the real dial failure (ECONNREFUSED)."""
+        assert af.failure_signature("connect ECONNREFUSED 10.0.0.1:443\n", harness="goose") == (
+            "infra-failure", "egress-denied")
