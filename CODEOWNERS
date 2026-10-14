@@ -5,8 +5,14 @@
 # This repo is unusual: it IS the harness. `agent-base/` builds the image every ride runs inside,
 # so a bad merge here does not break one project — it breaks the fleet's ability to fix itself.
 # The fixer's scope is the harness SOURCES plus tests/; the things that decide what ships are owned.
+# Narrowed 2026-10-13 (operator: homelab's rule work made the codeowner a non-blocker there, the
+# platform repos were the ones still parking PRs — homelab ADR-154): the image definition and the
+# root toolchain left the human gate, like homelab's own docker/ and devbox.json; a base-image
+# or toolchain bump merges on CI + the reviewer bot, the dep files on deps-pin-guard's shape test.
 #
 # GitHub semantics: LAST matching pattern wins, and a pattern with NO owner REMOVES ownership.
+# scripts/deps-pin-guard.sh reads this file at the merge-base to classify a mixed PR — only
+# `*`, `/dir/` and `/path` shapes; anything fancier fails that guard closed.
 
 # ── The build+publish path. `.github/workflows/` is governor-class HERE (unlike a stack repo,
 # where a deploy workflow is ordinary product plumbing): these workflows push the image the whole
@@ -22,15 +28,6 @@
 # agent-coordinator, 2026-09-27). One-line revert: restore the owner below.
 /.github/workflows/
 
-# ── The image definition + toolchain. A dep or base-image change ships to every ride at once, and
-# the lockfiles are what make a rebuild reproducible.
-/agent-base/Dockerfile          @RasmusSoot
-/devbox.json                    @RasmusSoot
-# agent-base/devbox.{json,lock} carved out 2026-08-11 (require_code_owner_review flipped true —
-# owning them would park every Renovate/devbox-update bump on a human). Ownership REPLACED, not
-# dropped: scripts/deps-pin-guard.sh in the required `ci` check permits only a pure
-# version/hash diff to these two files; anything wider (or mixed with other paths) reds CI.
-
 # ── The recipes are the agent's own instructions — an agent able to edit them is not gated at all.
 /.agents/                       @RasmusSoot
 
@@ -38,7 +35,13 @@
 # (homelab and oracle-fleet carry the same line for the same reason).
 /CODEOWNERS                     @RasmusSoot
 
-# Deliberately UNOWNED — this is the fixer's lane:
-#   agent-base/agent-finalize, agent-base/entrypoint.sh, agent-base/agent-storm-watchdog
-#   tests/, scripts/ci.sh, docs/, README.md
-# CI (the unit tests) is the gate there, plus the reviewer's approval.
+# Deliberately UNOWNED — CI (the unit tests) + the reviewer's approval are the gate:
+#   agent-base/Dockerfile (un-owned 2026-10-13; owned 2026-08-11 → 2026-10-13), agent-base/agent-finalize,
+#   agent-base/entrypoint.sh, agent-base/agent-storm-watchdog, tests/, scripts/ci.sh, docs/, README.md
+# The dep files are un-owned with a REPLACEMENT owner: scripts/deps-pin-guard.sh in the required
+# `ci` check passes only a version/hash diff of agent-base/devbox.{json,lock} (carved out
+# 2026-08-11) and the root devbox.{json,lock} (un-owned 2026-10-13, guarded the same way). A
+# non-version edit there is refused unless the PR also touches an OWNED path (the code owner
+# reads it all); since 2026-10-13 a PR mixing them with other UN-owned paths gets the shape test
+# instead of a refusal (openrouter-operator#83's fileset rule, agent-runtime#169 — under the
+# narrowed ownership that mix is a worker adapting a bump, not two lanes in one PR).

@@ -131,10 +131,20 @@ chmod +x .git/hooks/prepare-commit-msg
 # on the ride's behalf. Signatures still come from cache.nixos.org (bodies pass through
 # byte-for-byte), so no trusted-key change. If the mirror is down the closure genuinely is
 # unavailable — that surfaces as a failure instead of silently escaping the sandbox.
+#
+# APPEND to an inbound NIX_CONFIG, never replace it (2026-10-09): the homelab launcher pins
+# `flake-registry =` (an empty global registry) in the pod env, because devbox's "Ensuring nixpkgs
+# registry is downloaded" step otherwise makes nix fetch channels.nixos.org/flake-registry.json —
+# egress-denied, 1166 POLICY_DENIED drops in 7 d (teststuffstash/sleep-tracking#67). NIX_CONFIG is
+# a single variable, so a plain assignment here silently dropped that pin. Later lines win in nix,
+# and nothing the launcher sets names `substituters`, so the order below is safe.
 NIX_CACHE_URL="${NIX_CACHE_URL:-http://nixcache.nix-cache.svc.cluster.local}"
 if [ -n "$NIX_CACHE_URL" ]; then
-  export NIX_CONFIG="substituters = ${NIX_CACHE_URL}?priority=10
+  # >>>NIX-CACHE-CONFIG>>>
+  export NIX_CONFIG="${NIX_CONFIG:+$NIX_CONFIG
+}substituters = ${NIX_CACHE_URL}?priority=10
 extra-trusted-substituters = ${NIX_CACHE_URL}"
+  # <<<NIX-CACHE-CONFIG<<<
 fi
 
 # Stack devbox-cache (homelab FU-096): the launcher mounts the stack's CI-published cache artifact

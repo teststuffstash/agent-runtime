@@ -24,6 +24,7 @@ network. The wiring test stubs `subprocess.run` and records argv, exactly like
 `test_summary_channel.py`'s FakeGitHub.
 """
 import json
+import re
 
 import pytest
 
@@ -63,11 +64,23 @@ class FakeGH:
         if argv[0] != "api":
             return _Done(0)
         method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
-        path = [a for a in argv[1:] if not a.startswith("-") and a != method][0]
+        path = [a for a in argv[1:] if not a.startswith("-") and a != method
+                and not (a.startswith(".") and "--jq" in argv)][0]
         body = (json.loads(stdin) if stdin else {}).get("body")
         if path.endswith("/check-runs"):
             self.check_runs.append(json.loads(stdin))
             return _Done(0, json.dumps({"id": 7}))
+        # The #32 guarantee's REST seam (homelab#2063): the PR object (body + base), the #107
+        # PR-number probe (nothing in this world is a PR → 404), the body PATCH, the default branch.
+        if re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+", path):
+            if ".number" in argv:
+                return _Done(1, "", "HTTP 404: Not Found\n")
+            if method == "PATCH":
+                self.pr_body = body
+                return _Done(0, json.dumps({"body": body}))
+            return _Done(0, json.dumps({"body": self.pr_body, "base": {"ref": "master"}}))
+        if re.fullmatch(r"repos/[^/]+/[^/]+", path) and ".default_branch" in argv:
+            return _Done(0, "master\n")
         if method == "GET":
             return _Done(0, json.dumps(self.comments))
         if method == "POST":
