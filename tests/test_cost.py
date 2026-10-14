@@ -151,6 +151,137 @@ class TestCostFields:
         assert out == {"cost_usd": 0.0}
 
 
+class TestSharedKeyCost:
+    """Issue #173: a ride on the STANDING (shared) key must not report the key's cumulative delta
+    as its own cost.
+
+    `or_usage()` reads the KEY's cumulative spend, so the delta over the ride's wall time is this
+    ride's $ only when the key belongs to this ride alone. On the standing key
+    (`<project>-openrouter` — the `session_key` every ride in the 2026-10-05/06 homelab wave rode
+    until the launcher started minting per-session keys mid-wave) every concurrent sibling's spend
+    lands in the same delta. The r8 window's standing-key rides reported 1.7–3.3× their
+    provider-reported spend (homelab#2522: #1896 r1 said $2.0253 against $0.6138), the ledger's
+    `total_cost_usd`/`calibration_error` carried the siblings' money, and the goal-budget
+    pre-flight charged it as this ride's settled spend.
+
+    Shape 1 (chosen): the delta is not attributed. No `cost_usd` — the same "unknown" a 401'd key
+    gets (#12/#41), which the ledger already handles as "ridden, no ledger entry" (conservative cap
+    charge, FU-131) — and the raw key delta rides under `cost_usd_shared_key`, a name nothing
+    downstream reads as attributed spend. Shape 2 (attribute per session from the proxy's
+    `run_reports` record, #115) would need the proxy's per-session ref, which the pod does not
+    hold; the launcher's naming already states the provenance, so no new dependency is needed.
+
+    The launcher's naming is the signal: a per-session mint is
+    `<project>-session-issue-N-round-R-openrouter`, the standing key is `<project>-openrouter`.
+    """
+
+    @pytest.mark.parametrize("session_key, shared", [
+        ("homelab-openrouter", True),                              # the standing key
+        ("homelab-session-issue-1896-round-1-openrouter", False),  # a per-session mint
+        ("homelab-session-issue-1627-round-3-openrouter", False),
+        ("", False),                                               # unstated: no naming signal
+    ])
+    def test_shared_key_is_decided_by_the_launchers_naming(self, af, session_key, shared):
+        assert af.is_shared_key(session_key) is shared
+
+    def test_standing_key_delta_is_not_attributed(self, af):
+        """The r8 row verbatim: #1896 r1 rode the standing key and reported $2.0253 while its
+        provider-reported spend was $0.6138. That delta is the KEY's, so it must not be `cost_usd`."""
+        out = af.cost_fields(1.0, 1.0902, "homelab-openrouter")
+        assert "cost_usd" not in out
+        assert out == {"cost_usd_shared_key": 0.0902}
+
+    def test_per_session_key_delta_is_unchanged(self, af):
+        """A per-session mint's delta IS this ride's spend — the rows that agreed to a few cents."""
+        assert af.cost_fields(1.0, 1.0902, "homelab-session-issue-173-round-1-openrouter") == \
+            {"cost_usd": 0.0902}
+
+    def test_unstated_session_key_keeps_todays_attribution(self, af):
+        """No naming signal (a hand-run pod, or a pre-#173 launcher) is not positively the standing
+        key, so it must not silently drop a real ride's cost."""
+        assert af.cost_fields(1.0, 1.0902) == {"cost_usd": 0.0902}
+
+    def test_standing_key_probe_failure_is_still_unknown(self, af):
+        """#12 is untouched: a failed probe is unknown on any key — never a number, and never a
+        `cost_usd_shared_key` either (there is no delta to record)."""
+        assert af.cost_fields(1.0, None, "homelab-openrouter") == {"cost_unknown": True}
+
+    def test_shared_key_ride_pushes_no_attributed_cost_metric(self, af, fake_urlopen, monkeypatch):
+        """The pushgateway half of the acceptance: a shared-key ride's delta must not reach
+        Prometheus as `agent_run_cost_usd` (the metric the cost dashboards pivot on)."""
+        box = fake_urlopen(lambda req: _Resp())
+        monkeypatch.setenv("AGENT_PUSHGATEWAY_URL", "http://pushgateway.invalid")
+        af.push_metrics({"project": "test", "cost_usd_shared_key": 0.0902}, "clean", "")
+        body = box["data"].decode()
+        assert "agent_run_cost_usd{" not in body
+        assert "0.0902" not in body
+
+    def test_cost_cell_names_the_shared_key_rather_than_a_dead_key(self, af):
+        """The run-stats table must not call a readable shared key "unreadable": the delta is
+        known, it is just not this ride's."""
+        cell = af._cost_cell({"cost_usd_shared_key": 0.0902})
+        assert "0.0902" in cell
+        assert "unreadable" not in cell
+
+
+class TestFinalizeSharedKeyWiring:
+    """The decision above is only worth anything if finalize() actually feeds it the session key.
+
+    `cost_fields` is pure, so the row above pins the arithmetic; this pins the WIRING — that
+    finalize() reads `AGENT_SESSION_KEY` (the same value the transcript manifest carries) and
+    passes it, so a standing-key ride's published stats carry no `cost_usd`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _explicit_env(self, monkeypatch):
+        """Pin every env var finalize() reads so ambient pod values can't steer these tests."""
+        for var in ("PROJECT", "HOSTNAME", "NODE_NAME", "HARNESS", "GOOSE_MODEL", "MODEL",
+                    "OPENROUTER_KEY_HASH", "AGENT_RAIL", "AGENT_DISPATCH_EPOCH",
+                    "OPENROUTER_API_KEY", "AGENT_REPORT_URL", "WORK_BRANCH", "AGENT_TASK",
+                    "HARNESS_EXIT", "STORM_MARKER", "AGENT_WATCHDOG_MARKER",
+                    "AGENT_PHASE_MARKS", "START_EPOCH", "USAGE_START", "AGENT_SESSION_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HOSTNAME", "test-pod")
+        monkeypatch.setenv("AGENT_WATCHDOG_MARKER", "/tmp/no-such-marker")
+
+    def _finalize_with(self, af, monkeypatch, tmp_path, session_key):
+        """Drive finalize() with the heavy legs stubbed and return the stats bookkeeping() saw."""
+        captured = {}
+        monkeypatch.setattr(af, "bookkeeping", lambda stats, log_path: captured.update(stats))
+        monkeypatch.setattr(af, "salvage_push", lambda stats, log_path: None)
+        monkeypatch.setattr(af, "derive_pr_url", lambda stats: None)
+        monkeypatch.setattr(af, "push_metrics", lambda stats, exit_status, error_class: None)
+        monkeypatch.setattr(af, "push_phase_metrics", lambda durations, stats: None)
+        monkeypatch.setattr(af, "upload_transcripts", lambda stats, log_path: None)
+        monkeypatch.setattr(af, "parse_outcome", lambda log_path: {})
+        monkeypatch.setattr(af, "claude_usage", lambda: {})
+        monkeypatch.setattr(af, "claude_cost_equiv", lambda log_path: None)
+        monkeypatch.setattr(af, "router_report", lambda stats, exit_status, error_class: "")
+        monkeypatch.setattr(af, "classify", lambda log_path, stats: ("clean", ""))
+        # The two probe ends: a banked baseline of $1.00 and an end read of $1.0902.
+        monkeypatch.setattr(af, "or_usage", lambda: 1.0902)
+        monkeypatch.setattr(af, "START_EPOCH", str(tmp_path / "no-start-epoch"))
+        monkeypatch.setattr(af, "USAGE_START", str(tmp_path / "usage-start"))
+        (tmp_path / "usage-start").write_text("1.0")
+        monkeypatch.setattr(af.time, "sleep", lambda _s: None)  # finalize's settle sleep
+        monkeypatch.setenv("AGENT_SESSION_KEY", session_key)
+        log_path = str(tmp_path / "run.log")
+        (tmp_path / "run.log").write_text("run log\n")
+        af.finalize(log_path)
+        return captured
+
+    def test_standing_key_ride_publishes_no_cost_usd(self, af, monkeypatch, tmp_path):
+        stats = self._finalize_with(af, monkeypatch, tmp_path, "homelab-openrouter")
+        assert "cost_usd" not in stats
+        assert stats["cost_usd_shared_key"] == 0.0902
+
+    def test_per_session_ride_publishes_cost_usd(self, af, monkeypatch, tmp_path):
+        stats = self._finalize_with(af, monkeypatch, tmp_path,
+                                    "homelab-session-issue-173-round-1-openrouter")
+        assert stats["cost_usd"] == 0.0902
+        assert "cost_usd_shared_key" not in stats
+
+
 class TestRouterReportCost:
     """The ADR-096 M5 `/report` ledger POST — the last site that fabricated a cost.
 
@@ -489,7 +620,7 @@ class TestFinalizeProviderOrdering:
         monkeypatch.setattr(af, "claude_usage", lambda: {})
         monkeypatch.setattr(af, "claude_cost_equiv", lambda log_path: None)
         monkeypatch.setattr(af, "or_usage", lambda: None)
-        monkeypatch.setattr(af, "cost_fields", lambda start, end: {"cost_usd": 0.09})
+        monkeypatch.setattr(af, "cost_fields", lambda start, end, session_key=None: {"cost_usd": 0.09})
         monkeypatch.setattr(af, "_read_float", lambda path: None)
 
         # Stub classify to return clean exit
