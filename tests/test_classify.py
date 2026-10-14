@@ -616,7 +616,8 @@ SIGNATURE_DECISION_TABLE = [
     # naming POLICY_DENIED classified an entire log as an egress drop, and a real `-32602`
     # truncation death carrying an incidental `connection refused` was struck as an infra fault.
     ("egress vocabulary in prose",
-     "# (`POLICY_DENIED`) and the retry storm surfaced as repeated 403s\n", None),
+     "# (`POLICY_DENIED`) and the retry storm surfaced as repeated 403s, so the taxonomy folded the fault\n",
+     None),
     ("truncation death with an incidental connection refused",
      "-32602: Could not interpret tool use parameters\nconnection refused\n",
      ("harness-death", "goose-32602-truncation")),

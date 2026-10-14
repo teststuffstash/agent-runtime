@@ -434,7 +434,13 @@ _BUDGET_ALL_RE = _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESID
 # mirror is a private IP; a public-host timeout stays the generic `timeout` class).
 _EGRESS_DENIED_RE = (
     r"POLICY_DENIED"
-    r"|connection refused"
+    # The DIAL shape, not the bare phrase (#164 round 2): `connection refused` alone is prose, a
+    # test's own output, or a docstring, and it outranks truncation — so a real `-32602` death
+    # carrying an incidental mention was struck as an infra fault. A refused connection is only
+    # evidence when it is a dial result: Go's `dial tcp <addr>: connect: connection refused`, or
+    # node's `ECONNREFUSED`.
+    r"|dial tcp[^\n]*connect: connection refused"
+    r"|ECONNREFUSED"
     r"|(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
     r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})"
     r"[^\n]*(?:i/o timeout|connection timed out|timed out)"
@@ -489,6 +495,38 @@ def _ride_diff_text():
         return r.stdout
     except Exception:
         return ""
+
+
+_OWN_SOURCE_LINES = None
+
+
+def _own_source_lines():
+    """The stripped lines of THIS module's own source (cached), or an empty set when unreadable.
+
+    A ride sent to work on this classifier reads this file, so its pattern definitions, comments
+    and docstrings arrive in the run log as text. `_BUDGET_SOURCE_RE` recognises only the shapes
+    the budget family happens to be written in; the egress vocabulary also appears in plain prose,
+    and a single comment line naming POLICY_DENIED classified an entire log as an egress drop
+    (#164). The structural guard: a line that is also a line of this file's source is this file's
+    text, never a provider's response. Best-effort — an unreadable source leaves the arm's input
+    unchanged, never fatal.
+    """
+    global _OWN_SOURCE_LINES
+    if _OWN_SOURCE_LINES is None:
+        try:
+            with open(__file__) as fh:
+                _OWN_SOURCE_LINES = {l.strip() for l in fh.read().splitlines() if l.strip()}
+        except Exception:
+            _OWN_SOURCE_LINES = set()
+    return _OWN_SOURCE_LINES
+
+
+def _source_free_text(text):
+    """`text` with this module's own source lines removed (the #164 generalisation of #136)."""
+    own = _own_source_lines()
+    if not own:
+        return text
+    return "\n".join(l for l in text.splitlines() if l.strip() not in own)
 
 
 def _budget_text(text, ride_diff=""):
@@ -729,7 +767,11 @@ def failure_signature(text, ci_passed=None, watchdog="", harness="", ride_diff="
     # connection-refused / SYN-timeout to a private IP) is an INFRA fault, not auth. Counted here
     # and matched BEFORE the HTTP-status fallback below, so a 403 storm the drop surfaced as cannot
     # fold the network fault into the auth bucket and strike the model.
-    egress = n(_EGRESS_DENIED_RE)
+    # #164 round 2: counted over _source_free_text(_budget_text(...)) — this file's own source lines
+    # and the ride's own diff are removed, so a ride that READ this classifier (which is what a fix
+    # ride on this file does) cannot strike its own model with the arm's vocabulary. Scoped to this
+    # arm only: the budget and auth call sites are untouched.
+    egress = n(_EGRESS_DENIED_RE, _source_free_text(_budget_text(text, ride_diff)))
     # `-32602` must be the CODE, not the NAME: a ride whose content (issue body, docs, router
     # tests, its own report) mentions `goose-32602-truncation` or "(goose `-32602`)" is text, not a
     # death — homelab#1705: three false strikes in one afternoon, two of them rides that opened a
