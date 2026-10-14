@@ -620,7 +620,7 @@ class TestFinalizeProviderOrdering:
         monkeypatch.setattr(af, "claude_usage", lambda: {})
         monkeypatch.setattr(af, "claude_cost_equiv", lambda log_path: None)
         monkeypatch.setattr(af, "or_usage", lambda: None)
-        monkeypatch.setattr(af, "cost_fields", lambda start, end: {"cost_usd": 0.09})
+        monkeypatch.setattr(af, "cost_fields", lambda start, end, session_key=None: {"cost_usd": 0.09})
         monkeypatch.setattr(af, "_read_float", lambda path: None)
 
         # Stub classify to return clean exit

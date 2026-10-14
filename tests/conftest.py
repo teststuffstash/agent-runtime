@@ -71,6 +71,11 @@ def _clean_env(monkeypatch, tmp_path, af):
     monkeypatch.delenv("HARNESS_EXIT", raising=False)
     monkeypatch.delenv("AGENT_TASK", raising=False)
     monkeypatch.delenv("WORK_BRANCH", raising=False)
+    # #173: finalize() now reads AGENT_SESSION_KEY to decide whether the usage delta is THIS
+    # ride's (a per-session mint) or the standing key's (sibling-inclusive). The pod running this
+    # suite has the standing key exported, so left ambient it would re-label every driven
+    # finalize()'s cost. Tests that exercise the decision opt in explicitly.
+    monkeypatch.delenv("AGENT_SESSION_KEY", raising=False)
     # Both marker names, because the reader honours STORM_MARKER as a fallback (#46) — an exported
     # one would otherwise point classify() at a real marker file and decide these tests.
     monkeypatch.delenv("STORM_MARKER", raising=False)

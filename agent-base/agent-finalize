@@ -126,7 +126,22 @@ def router_report(stats, exit_status, error_class):
         return ""
 
 
-def cost_fields(usage_start, usage_end):
+def is_shared_key(session_key):
+    """True when the ride's OpenRouter key is the STANDING (shared) key, not a per-session mint
+    (agent-runtime#173).
+
+    `or_usage()` reads the KEY's cumulative spend, so the delta over the ride's wall time is this
+    ride's $ only when the key belongs to this ride alone. The launcher's naming is the signal —
+    the same `session_key` the transcript manifest carries: a per-session mint is
+    `<project>-session-issue-N-round-R-openrouter`, the standing key is `<project>-openrouter`.
+    An UNSTATED key (a hand-run pod, or a launcher older than the per-session mint) is not
+    positively the standing key, so it keeps today's attribution: the shared case is identified
+    by the naming, never guessed.
+    """
+    return bool(session_key) and "-session-" not in session_key
+
+
+def cost_fields(usage_start, usage_end, session_key=None):
     """The usage delta → the stats' cost fields. Pure, so the #12 invariant is testable.
 
     Either end being None means the probe FAILED, not that it read zero — a dead key 401s
@@ -134,10 +149,20 @@ def cost_fields(usage_start, usage_end):
     exactly the key-death runs. Unknown is unknown: no number at all, `cost_unknown` instead, and
     the ledger-reflex prices the run later from the activity API (FU-057). The clamp covers a
     residual negative from usage accounting still settling — that is 0, never a discount.
+
+    #173: the delta is the KEY's cumulative spend, which is this ride's $ only on a per-session
+    mint. On the standing (shared) key every concurrent sibling's spend lands in the same delta —
+    the r8 window's standing-key rides reported 1.7–3.3× their provider-reported spend — so it
+    must not ride as `cost_usd`. It goes out as `cost_usd_shared_key`, a name nothing downstream
+    reads as attributed spend, and the ride's own cost stays unknown: the same treatment a 401'd
+    key gets (#12/#41), which the ledger already handles as "ridden, no ledger entry" (FU-131).
     """
     if usage_start is None or usage_end is None:
         return {"cost_unknown": True}
-    return {"cost_usd": max(0.0, round(usage_end - usage_start, 4))}
+    delta = max(0.0, round(usage_end - usage_start, 4))
+    if is_shared_key(session_key):
+        return {"cost_usd_shared_key": delta}
+    return {"cost_usd": delta}
 
 
 def _read_float(path):
@@ -1415,6 +1440,10 @@ def _cost_cell(stats):
     """The one cost expression, shared by the table and the index line."""
     if "cost_usd" in stats:
         return "$%s" % stats["cost_usd"]
+    if "cost_usd_shared_key" in stats:
+        # #173: the key WAS readable — the delta is real, it just is not THIS ride's. Rendering
+        # "key unreadable" here would swap the old wrong number for a new falsehood.
+        return "$%s on the shared key (not attributable to this ride)" % stats["cost_usd_shared_key"]
     if stats.get("subscription"):
         return "subscription — %s turns, %s in (+%s cached) / %s out tok" % (
             stats.get("turns", "?"), stats.get("tokens_in", "?"),
@@ -2535,7 +2564,12 @@ def finalize(log_path):
             stats["cost_usd_equiv"] = round(equiv, 4)
     else:
         # Cost = usage delta, but ONLY when both ends read — see cost_fields (agent-runtime#12).
-        stats.update(cost_fields(_read_float(USAGE_START), or_usage()))
+        # #173: the delta is the KEY's, so it is attributed only on a per-session mint; the
+        # launcher's naming (AGENT_SESSION_KEY, the manifest's `session_key`) says which key this
+        # ride holds. On the standing key the delta is a sibling-inclusive figure and rides as
+        # `cost_usd_shared_key` instead — never as this ride's `cost_usd`.
+        stats.update(cost_fields(_read_float(USAGE_START), or_usage(),
+                                 os.environ.get("AGENT_SESSION_KEY")))
     stats.update(parse_outcome(log_path) if log_path else {})
     # Issue #116: stale-evidence check — when the recipe's final_output cites evidence with
     # parseable timestamps, assert max(evidence ts) > head commit ts. On violation, flag it
