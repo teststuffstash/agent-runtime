@@ -4,6 +4,7 @@ This is the function the ledger, the model-strike machinery and the router all k
 verdict here is not cosmetic: it decides whether a model gets struck and whether the coordinator
 re-dispatches. Every case below is drawn from a run that actually happened; the docstrings name it.
 """
+import pytest
 TRUNCATION_LOG = (
     "reading the spec\n"
     "-32602: Could not interpret tool use parameters for id chatcmpl-tool-9da57cd:\n"
@@ -579,3 +580,138 @@ class TestInputUnreadable:
 
 
 
+
+
+# ── homelab retro r7 F5 / agent-runtime#164 — the classifier as a decision table ────────────────
+#
+# oracle-fleet#778 round 1 (2026-10-03T12:55:38Z) emitted `error_class=http-403-storm` for what the
+# operator's platform note 15 minutes later named as a node egress-policy drop: the pod sent TCP
+# SYNs to `192.168.40.31:443` (the mcr.microsoft.com pull-through mirror, which serves plain HTTP
+# on :80) and the policy dropped them (`POLICY_DENIED`). The taxonomy folded a NETWORK fault into
+# the HTTP-403 bucket, so the strike swapped the MODEL (deepseek → haiku) for an infra fault, the
+# retro bundle's `infra_failure_events` read 0 for a week containing a real infra fault, and the
+# fleet-fault STRIKE channel could only fire on the class by misclassifying it twice.
+#
+# The fix is one arm, `egress-denied`, matched on POLICY_DENIED / connection-refused / SYN-timeout
+# evidence BEFORE the HTTP-status fallback and routed to the infra class (`infra-failure`) rather
+# than auth (`auth-storm`). The auth arms are unchanged.
+#
+# The table below is the acceptance: one row per evidence shape. The three egress rows are RED on
+# base (the POLICY_DENIED row folds into http-403-storm; the other two fall through to no-output)
+# and GREEN after the fix; every other row is unchanged.
+ORACLE_FLEET_778_LOG = (
+    # The operator's note on oracle-fleet#778, as the round's log carries it, plus the 403 storm
+    # the misclassification surfaced as. On base the 403s win (auth-storm/http-403-storm); the
+    # egress arm must outrank them.
+    "POLICY_DENIED: 192.168.40.31:443 (mcr.microsoft.com pull-through mirror, HTTP-only on :80)\n"
+    "403 forbidden\n" * 5
+)
+
+# (name, log, expected (exit_status, error_class) or None) — fed to failure_signature().
+SIGNATURE_DECISION_TABLE = [
+    ("403 storm", "403 forbidden\n" * 5, ("auth-storm", "http-403-storm")),
+    ("401 storm", "401 unauthorized\n" * 5, ("auth-storm", "http-401-storm")),
+    ("budget 403 key", "key limit exceeded\n", ("budget-403", "budget-exhausted-key")),
+    ("POLICY_DENIED", ORACLE_FLEET_778_LOG, ("infra-failure", "egress-denied")),
+    ("connection refused",
+     "dial tcp 192.168.40.31:443: connect: connection refused\n",
+     ("infra-failure", "egress-denied")),
+    ("SYN timeout to a private IP",
+     "dial tcp 192.168.40.31:443: i/o timeout\n",
+     ("infra-failure", "egress-denied")),
+    ("timeout", "context deadline exceeded\n", ("timeout", "timeout")),
+    ("harness death", "thread 'main' panicked at src/x.rs\n", ("harness-death", "goose-panic")),
+    ("goose 32602", TRUNCATION_LOG, ("harness-death", "goose-32602-truncation")),
+    ("unknown", "nothing recognizable in this log\n", None),
+    # ── the #164 round-2 rows (arbitration 2026-10-14) ──────────────────────────────────────────
+    # The egress arm's own vocabulary is not evidence of an egress drop. A ride sent to work on this
+    # classifier READS this file, so its pattern definitions, comments and docstrings arrive in the
+    # run log as text — and the egress vocabulary also appears in plain prose, which
+    # `_BUDGET_SOURCE_RE`'s three shapes do not recognise. At PR head f00c9aaf a single comment line
+    # naming POLICY_DENIED classified an entire log as an egress drop, and a real `-32602`
+    # truncation death carrying an incidental `connection refused` was struck as an infra fault.
+    ("egress vocabulary in prose",
+     "# (`POLICY_DENIED`) and the retry storm surfaced as repeated 403s, so the taxonomy folded the fault\n",
+     None),
+    ("truncation death with an incidental connection refused",
+     "-32602: Could not interpret tool use parameters\nconnection refused\n",
+     ("harness-death", "goose-32602-truncation")),
+    ("ECONNREFUSED dial", "connect ECONNREFUSED 10.0.0.1:443\n",
+     ("infra-failure", "egress-denied")),
+]
+
+# (name, log, stats, env, expected) — fed to classify() end to end.
+CLASSIFY_DECISION_TABLE = [
+    ("no-output", "nothing useful\n", {}, {"AGENT_TASK": "issue-7"}, ("failed", "no-output")),
+    # The #36 direction: an inherited PR must not mask the egress death.
+    ("egress outranks an inherited PR", ORACLE_FLEET_778_LOG, {"pr_url": "http://x/778"},
+     {"AGENT_TASK": "issue-778"}, ("infra-failure", "egress-denied")),
+]
+
+
+class TestDecisionTable:
+    """The classifier as a decision table — one row per evidence shape (agent-runtime#164)."""
+
+    @pytest.mark.parametrize("name,log,expected", SIGNATURE_DECISION_TABLE,
+                             ids=[row[0] for row in SIGNATURE_DECISION_TABLE])
+    def test_signature_decision_table(self, af, name, log, expected):
+        assert af.failure_signature(log, harness="goose") == expected
+
+    @pytest.mark.parametrize("name,log,stats,env,expected", CLASSIFY_DECISION_TABLE,
+                             ids=[row[0] for row in CLASSIFY_DECISION_TABLE])
+    def test_classify_decision_table(self, af, logfile, monkeypatch, name, log, stats, env,
+                                     expected):
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert af.classify(logfile(log), dict(stats)) == expected
+
+    def test_egress_outranks_the_http_status_fallback(self, af):
+        """The ordering the issue names: POLICY_DENIED + a 403 storm is egress, not auth."""
+        assert af.failure_signature(ORACLE_FLEET_778_LOG, harness="goose") == (
+            "infra-failure", "egress-denied")
+
+    def test_the_auth_arms_are_unchanged(self, af):
+        """No change to the auth arms: a pure 403/401 storm still classifies as auth-storm."""
+        assert af.failure_signature("403 forbidden\n" * 5, harness="goose") == (
+            "auth-storm", "http-403-storm")
+        assert af.failure_signature("401 unauthorized\n" * 5, harness="goose") == (
+            "auth-storm", "http-401-storm")
+
+    def test_infra_failure_is_a_death_class(self, af):
+        """`infra-failure` must be in DEATH_EXIT_STATUSES so bookkeeping strikes, not arms."""
+        assert "infra-failure" in af.DEATH_EXIT_STATUSES
+
+    def test_this_files_own_source_is_not_egress_evidence(self, af, af_source):
+        """A log built from THIS file's own source must not classify as an egress drop.
+
+        The reviewer's row: a ride sent to fix this classifier reads it, so the egress arm's own
+        comment, docstring and pattern-definition lines land in the run log verbatim. Those lines
+        name `POLICY_DENIED` and `connection refused` in plain prose, which the budget family's
+        `_BUDGET_SOURCE_RE` shapes do not recognise — so at PR head f00c9aaf the file struck itself
+        as an infra egress fault. Derived from the source rather than hardcoded, so the row cannot
+        drift away from the lines that actually strike.
+        """
+        log = "\n".join(
+            l for l in af_source.splitlines()
+            if "POLICY_DENIED" in l or "connection refused" in l or "ECONNREFUSED" in l
+        )
+        assert log, "the egress vocabulary must appear in this file's own source"
+        assert af.failure_signature(log + "\n", harness="goose") != (
+            "infra-failure", "egress-denied"), \
+            "this file's own source is not evidence of an egress drop"
+
+    def test_a_truncation_death_survives_an_incidental_connection_refused(self, af):
+        """A real `-32602` truncation death must stay `goose-32602-truncation`.
+
+        The egress arm outranks truncation by design (a drop surfaces as a 403 storm), so a loose
+        `connection refused` alternation let any incidental mention of the phrase — a test's own
+        output, a docstring — reclassify a harness death as an infra fault.
+        """
+        assert af.failure_signature(
+            "-32602: Could not interpret tool use parameters\nconnection refused\n",
+            harness="goose") == ("harness-death", "goose-32602-truncation")
+
+    def test_the_dial_shape_is_egress_evidence(self, af):
+        """The tightened alternation must still catch the real dial failure (ECONNREFUSED)."""
+        assert af.failure_signature("connect ECONNREFUSED 10.0.0.1:443\n", harness="goose") == (
+            "infra-failure", "egress-denied")
