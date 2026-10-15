@@ -442,14 +442,19 @@ _BUDGET_ACCOUNT_RE = (
     r"|(?=[^\n]*(?:" + _BUDGET_ACCOUNT_SHAPE_RE + r"))"
     r"[^\n]*?(?:" + _BUDGET_ACCOUNT_PHRASE_RE + r")"
 )
-_BUDGET_KEY_RE = r"key limit exceeded"
 # `check your account with your provider to add more credits` is goose's rendering of ANY provider
 # 402 (homelab issue-2308 r1, 2026-10-06 — retro r8 F3): one line, no code, no envelope, no URL, so
-# a per-session key at its cap and an empty account are indistinguishable on it — the residual arm
-# by definition, exactly like OpenRouter's own `requires more credits`. Goose then forces the
-# recipe's `final_output`, the contract JSON parses, and the run used to read `blocked-deliberate`.
-_BUDGET_RESIDUAL_RE = (r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
-                       r"|check your account with your provider to add more credits")
+# a per-session key at its cap and an empty account are indistinguishable on the line itself. Goose
+# then forces the recipe's `final_output`, the contract JSON parses, and the run used to read
+# `blocked-deliberate`. Operator ruling 2026-10-15 (retro r8 F3) resolves the ambiguity to the KEY
+# arm: the credit-floor gate (FU-088b, `OPENROUTER_MIN_CREDIT`) defers dispatch pre-spawn when the
+# ACCOUNT is low, so in practice the line means this ride's own session key hit its cap; a mid-ride
+# account drain is the residual mis-file, caught by the gate on the next dispatch. (Rejected: a
+# router lookup at classify time — a new reader for a once-a-week event; mapping to account — it
+# strikes a healthy cell.)
+_BUDGET_KEY_RE = (r"key limit exceeded"
+                  r"|check your account with your provider to add more credits")
+_BUDGET_RESIDUAL_RE = r"insufficient quota|require[sd]? more credit|quota exceeded|budget exceeded"
 # The three joined, defined once for the two consumers that want "any budget arm": the carry (#91)
 # and the source guard below.
 _BUDGET_ALL_RE = _BUDGET_ACCOUNT_RE + "|" + _BUDGET_KEY_RE + "|" + _BUDGET_RESIDUAL_RE
