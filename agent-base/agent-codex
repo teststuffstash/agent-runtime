@@ -14,7 +14,9 @@
 # Config is USER-LEVEL and runtime-supplied: Codex reads $CODEX_HOME/config.toml (default
 # ~/.codex). The image bakes NO auth.json — a custom `model_providers.<id>` with command-backed
 # bearer auth (`auth.command`/`args`/`cwd`/`timeout_ms`/`refresh_interval_ms`) is the launcher's
-# config, not the image's. This seam only points Codex at that home; it never writes a credential.
+# config, not the image's. This seam points Codex at that home and, for a GATEWAY ride (the three
+# dispatch env vars below), renders the provider block from the env VALUES; it never writes a
+# credential — the session token is read by the CLI through `env_key`.
 set -uo pipefail
 
 WORKDIR="${WORKDIR:-/work/repo}"
@@ -27,6 +29,35 @@ export CODEX_HOME
 
 cd "$WORKDIR" || exit 1
 mkdir -p "$(dirname "$RUN_LOG")"
+
+# The GATEWAY cell (homelab FU-270 — GW-SESSIONS-ENV's codex rows): a /sessions ride pulls exactly
+# OPENAI_BASE_URL, OPENAI_API_KEY and CODEX_MODEL into the env before this seam runs. The pinned CLI
+# reads its provider from CONFIG, not from env (observed with codex-cli 0.161.0: a bare
+# OPENAI_BASE_URL is ignored), so this seam renders the provider block from those VALUES: the base
+# url and the model are written, the token NEVER is — the CLI reads it through `env_key`. No such
+# env = no render: a mounted config.toml (the auth.command shape above) stands untouched.
+if [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${CODEX_MODEL:-}" ]; then
+  for v in "$OPENAI_BASE_URL" "$CODEX_MODEL"; do
+    case "$v" in *[\"\\$'\n'$'\r']*) echo "agent-codex: refusing to render a provider block from a value with a quote, backslash or newline" >&2; exit 78;; esac
+  done
+  mkdir -p "$CODEX_HOME"
+  ( umask 077; cat > "$CODEX_HOME/config.toml" <<TOML
+model = "${CODEX_MODEL}"
+model_provider = "agent-gateway"
+cli_auth_credentials_store = "file"
+[model_providers.agent-gateway]
+name = "agent-gateway"
+base_url = "${OPENAI_BASE_URL}"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+TOML
+  )
+  echo "→ agent-codex: provider block rendered into \$CODEX_HOME/config.toml (base_url=${OPENAI_BASE_URL}, model=${CODEX_MODEL}; the token stays in env)"
+fi
 
 # `exec --json` is the deterministic headless contract; the launcher supplies the prompt and any
 # extra flags. PIPESTATUS[0] is Codex's status — tee's is deliberately ignored.

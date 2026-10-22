@@ -179,6 +179,55 @@ class TestHeadlessContract:
         assert "boom" in run_log.read_text(encoding="utf-8")
 
 
+class TestGatewayProviderBlock:
+    """The gateway cell (homelab FU-270, GW-SESSIONS-ENV codex rows): the dispatch env's three values
+    become the provider block the CLI actually reads; the token never lands in the file."""
+
+    ENV = {"OPENAI_BASE_URL": "http://agent-gateway.agent-egress.svc.cluster.local:8080/openai/v1",
+           "OPENAI_API_KEY": "gws_DUMMY-SECRET-session-token", "CODEX_MODEL": "gpt-6-astra"}
+
+    def test_renders_the_block_from_the_env_values(self, tmp_path):
+        codex = _fake_codex(tmp_path, 'cat "$CODEX_HOME/config.toml" > "$FAKE_SEEN"\necho \'{"type":"thread.started"}\'\n')
+        seen = tmp_path / "seen.toml"
+        proc, _, _ = _run_seam(tmp_path, codex, env={**self.ENV, "FAKE_SEEN": str(seen)})
+        assert proc.returncode == 0, proc.stderr
+        cfg = (tmp_path / "codex-home" / "config.toml").read_text(encoding="utf-8")
+        assert cfg == seen.read_text(encoding="utf-8"), "the CLI saw the rendered file"
+        lines = cfg.splitlines()
+        assert 'model = "gpt-6-astra"' in lines
+        assert 'model_provider = "agent-gateway"' in lines
+        assert "[model_providers.agent-gateway]" in lines
+        assert 'base_url = "http://agent-gateway.agent-egress.svc.cluster.local:8080/openai/v1"' in lines
+        assert 'wire_api = "responses"' in lines
+        assert 'env_key = "OPENAI_API_KEY"' in lines
+        assert "requires_openai_auth = false" in lines
+
+    def test_the_token_never_lands_in_the_file_and_the_file_is_private(self, tmp_path):
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        proc, run_log, _ = _run_seam(tmp_path, codex, env=self.ENV)
+        assert proc.returncode == 0, proc.stderr
+        cfg_path = tmp_path / "codex-home" / "config.toml"
+        assert "DUMMY-SECRET" not in cfg_path.read_text(encoding="utf-8")
+        assert "DUMMY-SECRET" not in run_log.read_text(encoding="utf-8")
+        assert stat.S_IMODE(cfg_path.stat().st_mode) == 0o600
+
+    def test_no_gateway_env_means_no_render(self, tmp_path):
+        """A mounted config (the auth.command shape) stands: the seam renders only for a gateway ride."""
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        (home / "config.toml").write_text("model_provider = \"mounted\"\n", encoding="utf-8")
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        proc, _, _ = _run_seam(tmp_path, codex)
+        assert proc.returncode == 0, proc.stderr
+        assert (home / "config.toml").read_text(encoding="utf-8") == "model_provider = \"mounted\"\n"
+
+    def test_a_value_that_would_break_toml_is_refused(self, tmp_path):
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        proc, _, _ = _run_seam(tmp_path, codex, env={**self.ENV, "CODEX_MODEL": 'x" \nmodel_provider = "evil'})
+        assert proc.returncode == 78
+        assert not (tmp_path / "codex-home" / "config.toml").exists()
+
+
 class TestRuntimeConfigWithoutAuthJson:
     """A custom provider + command-backed bearer source, with no `auth.json` anywhere."""
 
