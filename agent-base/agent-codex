@@ -36,8 +36,13 @@ mkdir -p "$(dirname "$RUN_LOG")"
 # OPENAI_BASE_URL is ignored), so this seam renders the provider block from those VALUES: the base
 # url and the model are written, the token NEVER is — the CLI reads it through `env_key`. No such
 # env = no render: a mounted config.toml (the auth.command shape above) stands untouched.
+# The stack's MCP knob (homelab #1041, `spec.mcp.endpoint`) rides the same render: the launcher's
+# codex arm exports CODEX_MCP_URL and this seam appends the pinned CLI's remote-server shape —
+# `[mcp_servers.<name>] url = "…"` (codex-rs `config/src/mcp_types.rs` StreamableHttp; no bearer,
+# no headers: the endpoint is unauthenticated inside the cluster, as for the other three harnesses).
+# No CODEX_MCP_URL = no block; no gateway render = no block either (a mounted config stands).
 if [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${CODEX_MODEL:-}" ]; then
-  for v in "$OPENAI_BASE_URL" "$CODEX_MODEL"; do
+  for v in "$OPENAI_BASE_URL" "$CODEX_MODEL" "${CODEX_MCP_URL:-}"; do
     case "$v" in *[\"\\$'\n'$'\r']*) echo "agent-codex: refusing to render a provider block from a value with a quote, backslash or newline" >&2; exit 78;; esac
   done
   mkdir -p "$CODEX_HOME"
@@ -55,8 +60,14 @@ supports_websockets = false
 request_max_retries = 0
 stream_max_retries = 0
 TOML
+    if [ -n "${CODEX_MCP_URL:-}" ]; then
+      cat >> "$CODEX_HOME/config.toml" <<TOML
+[mcp_servers.stack-mcp]
+url = "${CODEX_MCP_URL}"
+TOML
+    fi
   )
-  echo "→ agent-codex: provider block rendered into \$CODEX_HOME/config.toml (base_url=${OPENAI_BASE_URL}, model=${CODEX_MODEL}; the token stays in env)"
+  echo "→ agent-codex: provider block rendered into \$CODEX_HOME/config.toml (base_url=${OPENAI_BASE_URL}, model=${CODEX_MODEL}; the token stays in env${CODEX_MCP_URL:+; mcp_servers.stack-mcp=${CODEX_MCP_URL}})"
 fi
 
 # `exec --json` is the deterministic headless contract; the launcher supplies the prompt and any
