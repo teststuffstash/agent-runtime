@@ -44,7 +44,10 @@ agent-codex "<prompt>"        # → codex exec --json "<prompt>"
 - on a gateway ride (homelab FU-270: `OPENAI_BASE_URL` + `CODEX_MODEL` pulled from `/sessions`) renders
   the provider block into `$CODEX_HOME/config.toml` — the token never lands in the file — and, when the
   launcher exports `CODEX_MCP_URL` (the stack's `spec.mcp.endpoint`, homelab #1041), appends
-  `[mcp_servers.stack-mcp] url = "…"`, the pinned CLI's remote-server shape.
+  `[mcp_servers.stack-mcp] url = "…"`, the pinned CLI's remote-server shape. The same render turns
+  off the optional update, analytics, feedback, plugin, apps and API-key model-discovery switches —
+  the contract, with each switch's source basis and limits, is in
+  [docs/codex-worker-config.md](docs/codex-worker-config.md).
 
 `agent-finalize` decodes that JSONL: `parse_outcome()` reads the **last** `item.completed` event
 whose `item.type` is `agent_message` and extracts the recipe's contract from its `text` (on disk it

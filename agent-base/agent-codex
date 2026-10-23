@@ -46,10 +46,22 @@ if [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${CODEX_MODEL:-}" ]; then
     case "$v" in *[\"\\$'\n'$'\r']*) echo "agent-codex: refusing to render a provider block from a value with a quote, backslash or newline" >&2; exit 78;; esac
   done
   mkdir -p "$CODEX_HOME"
+  # The optional phone-home / update switches are OFF for every gateway worker (agent-runtime#181):
+  # updates are image-managed, and the gateway cell's egress is deny-by-default. The table keys
+  # must precede the provider table, or TOML would file them under it. See docs/codex-worker-config.md.
   ( umask 077; cat > "$CODEX_HOME/config.toml" <<TOML
 model = "${CODEX_MODEL}"
 model_provider = "agent-gateway"
 cli_auth_credentials_store = "file"
+check_for_update_on_startup = false
+[analytics]
+enabled = false
+[feedback]
+enabled = false
+[features]
+plugins = false
+apps = false
+api_key_model_discovery = false
 [model_providers.agent-gateway]
 name = "agent-gateway"
 base_url = "${OPENAI_BASE_URL}"
