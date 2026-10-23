@@ -221,6 +221,30 @@ class TestGatewayProviderBlock:
         assert proc.returncode == 0, proc.stderr
         assert (home / "config.toml").read_text(encoding="utf-8") == "model_provider = \"mounted\"\n"
 
+    def test_the_mcp_knob_appends_the_remote_server_block(self, tmp_path):
+        """homelab #1041's stack knob on the codex harness (FU-270): CODEX_MCP_URL → the pinned CLI's
+        `[mcp_servers.<name>] url` shape, after the provider block, in the same private file."""
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        url = "http://stack-mcp.oracle-fleet.svc.cluster.local:8080/mcp"
+        proc, run_log, _ = _run_seam(tmp_path, codex, env={**self.ENV, "CODEX_MCP_URL": url})
+        assert proc.returncode == 0, proc.stderr
+        cfg = (tmp_path / "codex-home" / "config.toml").read_text(encoding="utf-8")
+        assert cfg.endswith("[mcp_servers.stack-mcp]\nurl = \"%s\"\n" % url), cfg
+        assert cfg.index("[model_providers.agent-gateway]") < cfg.index("[mcp_servers.stack-mcp]")
+        assert "stack-mcp=" + url in proc.stdout, "the seam's ready line names the attach"
+
+    def test_no_mcp_knob_means_no_server_block(self, tmp_path):
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        proc, _, _ = _run_seam(tmp_path, codex, env=self.ENV)
+        assert proc.returncode == 0, proc.stderr
+        assert "mcp_servers" not in (tmp_path / "codex-home" / "config.toml").read_text(encoding="utf-8")
+
+    def test_an_mcp_url_that_would_break_toml_is_refused(self, tmp_path):
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        proc, _, _ = _run_seam(tmp_path, codex, env={**self.ENV, "CODEX_MCP_URL": 'http://x"\n[evil]'})
+        assert proc.returncode == 78
+        assert not (tmp_path / "codex-home" / "config.toml").exists()
+
     def test_a_value_that_would_break_toml_is_refused(self, tmp_path):
         codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
         proc, _, _ = _run_seam(tmp_path, codex, env={**self.ENV, "CODEX_MODEL": 'x" \nmodel_provider = "evil'})

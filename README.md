@@ -40,7 +40,11 @@ agent-codex "<prompt>"        # → codex exec --json "<prompt>"
 - runs in the prepared `$WORKDIR` (never the caller's cwd);
 - invokes `codex exec --json`, so the transcript is JSONL, one event per line;
 - tees stdout+stderr into `$RUN_LOG` (default `/tmp/run.log`) — the file `agent-finalize` reads;
-- exits with Codex's own status, unchanged.
+- exits with Codex's own status, unchanged;
+- on a gateway ride (homelab FU-270: `OPENAI_BASE_URL` + `CODEX_MODEL` pulled from `/sessions`) renders
+  the provider block into `$CODEX_HOME/config.toml` — the token never lands in the file — and, when the
+  launcher exports `CODEX_MCP_URL` (the stack's `spec.mcp.endpoint`, homelab #1041), appends
+  `[mcp_servers.stack-mcp] url = "…"`, the pinned CLI's remote-server shape.
 
 `agent-finalize` decodes that JSONL: `parse_outcome()` reads the **last** `item.completed` event
 whose `item.type` is `agent_message` and extracts the recipe's contract from its `text` (on disk it
