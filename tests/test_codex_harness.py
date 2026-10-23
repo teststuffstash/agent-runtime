@@ -15,6 +15,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SEAM = ROOT / "agent-base" / "agent-codex"
@@ -250,6 +251,148 @@ class TestGatewayProviderBlock:
         proc, _, _ = _run_seam(tmp_path, codex, env={**self.ENV, "CODEX_MODEL": 'x" \nmodel_provider = "evil'})
         assert proc.returncode == 78
         assert not (tmp_path / "codex-home" / "config.toml").exists()
+
+
+# The optional phone-home / update switches a gateway worker turns OFF (agent-runtime#181, pinned to
+# codex-cli 0.162.1 — see docs/codex-worker-config.md). Each is a (table, key) path in the TOML.
+OPT_OUTS = [
+    ("check_for_update_on_startup",),
+    ("analytics", "enabled"),
+    ("feedback", "enabled"),
+    ("features", "plugins"),
+    ("features", "apps"),
+    ("features", "api_key_model_discovery"),
+]
+
+
+def _toml_at(cfg, path):
+    """The value at `path` in a parsed TOML document, or None if any table on the way is missing."""
+    for key in path:
+        if not isinstance(cfg, dict) or key not in cfg:
+            return None
+        cfg = cfg[key]
+    return cfg
+
+
+def _child_config(tmp_path, env):
+    """Run the seam with a fake codex that copies the config it was LAUNCHED with, then parse that
+    copy. The assertions read the bytes the child sees, not the shell source that wrote them."""
+    seen = tmp_path / "child-config.toml"
+    codex = _fake_codex(
+        tmp_path,
+        'cat "$CODEX_HOME/config.toml" > "$FAKE_SEEN"\necho \'{"type":"thread.started"}\'\n',
+    )
+    proc, _, _ = _run_seam(tmp_path, codex, env={**env, "FAKE_SEEN": str(seen)})
+    assert proc.returncode == 0, proc.stderr
+    return proc, tomllib.loads(seen.read_text(encoding="utf-8"))
+
+
+class TestGatewayTelemetryOptOuts:
+    """agent-runtime#181 (homelab FU-270): a gateway-rendered worker config turns the six optional
+    phone-home / update switches OFF at their pinned paths, and leaves provider, auth, transport and
+    retry settings exactly as they were. Parsed with tomllib, so a key in the wrong table, a string
+    "false", or a key stranded after a table header all fail here."""
+
+    ENV = TestGatewayProviderBlock.ENV
+
+    def test_every_optional_switch_is_explicitly_false_at_its_path(self, tmp_path):
+        _, cfg = _child_config(tmp_path, self.ENV)
+        for path in OPT_OUTS:
+            assert _toml_at(cfg, path) is False, ".".join(path)
+
+    def test_provider_auth_transport_and_retry_settings_keep_their_values(self, tmp_path):
+        _, cfg = _child_config(tmp_path, self.ENV)
+        assert cfg["model"] == "gpt-6-astra"
+        assert cfg["model_provider"] == "agent-gateway"
+        assert cfg["cli_auth_credentials_store"] == "file"
+        assert cfg["model_providers"] == {
+            "agent-gateway": {
+                "name": "agent-gateway",
+                "base_url": self.ENV["OPENAI_BASE_URL"],
+                "wire_api": "responses",
+                "env_key": "OPENAI_API_KEY",
+                "requires_openai_auth": False,
+                "supports_websockets": False,
+                "request_max_retries": 0,
+                "stream_max_retries": 0,
+            }
+        }
+
+    def test_no_mcp_block_without_the_mcp_knob(self, tmp_path):
+        _, cfg = _child_config(tmp_path, self.ENV)
+        assert "mcp_servers" not in cfg
+
+    def test_stack_mcp_survives_the_opt_outs(self, tmp_path):
+        """Disabling plugins/apps must not disable the explicitly configured stack MCP server."""
+        url = "http://stack-mcp.oracle-fleet.svc.cluster.local:8080/mcp"
+        _, cfg = _child_config(tmp_path, {**self.ENV, "CODEX_MCP_URL": url})
+        assert cfg["mcp_servers"] == {"stack-mcp": {"url": url}}
+        for path in OPT_OUTS:
+            assert _toml_at(cfg, path) is False, ".".join(path)
+
+    def test_a_recipe_shaped_prompt_gets_the_same_policy_and_an_intact_argv(self, tmp_path):
+        """Both calling styles reach the child through one seam: the policy is the same, and the
+        prompt and caller flags arrive as the exact argv the launcher passed."""
+        prompt = 'Fix issue #181.\n\nRun `devbox run ci`; report "done" and stop.\n'
+        argv_file = tmp_path / "argv"
+        seen = tmp_path / "child-config.toml"
+        codex = _fake_codex(
+            tmp_path,
+            r"""cat "$CODEX_HOME/config.toml" > "$FAKE_SEEN"
+printf '%s\0' "$@" > "$FAKE_ARGV"
+echo '{"type":"thread.started"}'
+""",
+        )
+        proc, _, _ = _run_seam(
+            tmp_path,
+            codex,
+            args=("--skip-git-repo-check", prompt),
+            env={**self.ENV, "FAKE_SEEN": str(seen), "FAKE_ARGV": str(argv_file)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert argv_file.read_bytes().split(b"\0")[:-1] == [
+            b"exec",
+            b"--json",
+            b"--skip-git-repo-check",
+            prompt.encode("utf-8"),
+        ]
+        cfg = tomllib.loads(seen.read_text(encoding="utf-8"))
+        for path in OPT_OUTS:
+            assert _toml_at(cfg, path) is False, ".".join(path)
+
+    def test_the_opt_outs_keep_the_private_file_and_the_exit_status(self, tmp_path):
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"turn.failed"}\'\nexit 7\n')
+        proc, run_log, _ = _run_seam(tmp_path, codex, env=self.ENV)
+        assert proc.returncode == 7, proc.stderr
+        cfg_path = tmp_path / "codex-home" / "config.toml"
+        assert stat.S_IMODE(cfg_path.stat().st_mode) == 0o600
+        assert "DUMMY-SECRET" not in cfg_path.read_text(encoding="utf-8")
+        assert "DUMMY-SECRET" not in run_log.read_text(encoding="utf-8")
+
+    def test_a_mounted_config_is_never_given_the_opt_outs(self, tmp_path):
+        """No gateway env: the mounted config stands byte-for-byte, native jail included."""
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        mounted = 'model_provider = "mounted"\n'
+        (home / "config.toml").write_text(mounted, encoding="utf-8")
+        codex = _fake_codex(tmp_path, 'echo \'{"type":"thread.started"}\'\n')
+        proc, _, _ = _run_seam(tmp_path, codex)
+        assert proc.returncode == 0, proc.stderr
+        assert (home / "config.toml").read_text(encoding="utf-8") == mounted
+
+
+class TestWorkerConfigDocs:
+    """The contract is written down where an operator will look, and linked from the README."""
+
+    DOC = ROOT / "docs" / "codex-worker-config.md"
+
+    def test_each_switch_is_documented(self):
+        text = self.DOC.read_text(encoding="utf-8")
+        for path in OPT_OUTS:
+            assert ".".join(path) in text, ".".join(path)
+
+    def test_the_readme_links_the_contract(self):
+        assert "docs/codex-worker-config.md" in (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 class TestRuntimeConfigWithoutAuthJson:
