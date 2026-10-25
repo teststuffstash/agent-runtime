@@ -157,9 +157,15 @@ jobs:
           git commit -q -am "deploy: agent-base ${TAG}"
           git push -q -f origin deploy/agent-base
           PR=$(gh pr list --repo "${{ github.repository_owner }}/homelab" --head deploy/agent-base --state open --json number --jq '.[0].number // empty')
+          # The composition bump changes what the AgentStack renders, so homelab's xr-render gate needs
+          # a Render-change line; set on BOTH paths (the reused PR keeps its first body otherwise).
+          BODY="First-party agent-base image bump (CI-opened, not Renovate). Agent worker pods pick it up on next spawn.
+
+          Render-change: the prober's agent-base literal in the AgentStack composition rides this pin (agent-runtime 4a8723f)"
           [ -n "$PR" ] || PR=$(gh pr create --repo "${{ github.repository_owner }}/homelab" --base master --head deploy/agent-base \
-            --title "deploy: agent-base ${TAG}" \
-            --body "First-party agent-base image bump (CI-opened, not Renovate). Agent worker pods pick it up on next spawn." | grep -oE '[0-9]+$')
+            --title "deploy: agent-base ${TAG}" --body "$BODY" | grep -oE '[0-9]+$')
+          gh pr edit "$PR" --repo "${{ github.repository_owner }}/homelab" --title "deploy: agent-base ${TAG}" --body "$BODY" \
+            || echo "::warning::could not set the body on homelab#$PR — xr-render will want a Render-change line"
           # The MECHANICAL lane (docs/dependency-upgrades.md 2): `automerge` makes homelab's review
           # reflex SKIP the PR (no LLM burned on a one-line CalVer bump) and, with `dependencies` +
           # a Bot author, satisfies renovate-approve.reusable.yml's gate so the required approval is
