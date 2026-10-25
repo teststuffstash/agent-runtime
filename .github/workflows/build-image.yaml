@@ -151,6 +151,9 @@ jobs:
           git config user.name "homelab-deploy[bot]"; git config user.email "homelab-deploy[bot]@users.noreply.github.com"
           git checkout -q -B deploy/agent-base
           sed -i -E "s#^(${VAR}=).*#\1${NEWREF}#" agents/images.env
+          # The prober's agent-base literal in the AgentStack composition rides the same pin (it cannot
+          # source images.env; homelab FU-270 fork C, #2905) — one bump, both consumers.
+          sed -i -E "s#(ghcr\.io/${{ github.repository_owner }}/agent-base:)[^[:space:]\"']+#\1${TAG}#" argocd/resources/agentstack/composition.yaml
           git commit -q -am "deploy: agent-base ${TAG}"
           git push -q -f origin deploy/agent-base
           PR=$(gh pr list --repo "${{ github.repository_owner }}/homelab" --head deploy/agent-base --state open --json number --jq '.[0].number // empty')
