@@ -43,7 +43,7 @@ instructions: |
      COMMIT the failing test and PUSH the branch immediately — that banks the reproduction before
      you spend anything on the fix.
   3. Make the MINIMAL change to go green. Do not break the other tests.
-  4. `devbox run ci` green end-to-end, `devbox run scan-secrets` clean, then open the PR.
+  4. Then open the PR with `pr-open --title "…" --body-file <file>` (the ground rules): it runs this repo's gate (`devbox run pr-gate` = `devbox run ci` + `scan-secrets`) and opens the PR only on green — do not run that gate yourself just before.
 
   ⚠ Tests must be HERMETIC: no network, no cluster, no `gh`, no real `git remote`. If a fix seems
   to need them, you are testing at the wrong level — extract the decision into a pure function and
