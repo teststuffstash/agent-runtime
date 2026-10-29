@@ -104,14 +104,6 @@ extensions:
     timeout: 900
     bundled: true
 
-# ── Self-verification: keep going until the real gate is green ────────────────────────────────
-retry:
-  max_retries: 3
-  checks:
-    - type: shell
-      command: "devbox run ci"
-  on_failure: "devbox run ci 2>&1 | tail -40"
-
 # ── Structured result. Keys match what agent-finalize's parse_outcome() extracts — if you rename
 # one here it stops reaching the coordinator, silently.
 response:
