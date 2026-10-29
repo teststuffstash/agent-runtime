@@ -137,14 +137,6 @@ extensions:
     timeout: 900
     bundled: true
 
-# ── Self-verification: keep going until the real gate is green ────────────────────────────────
-retry:
-  max_retries: 3
-  checks:
-    - type: shell
-      command: "devbox run ci"
-  on_failure: "devbox run ci 2>&1 | tail -40"
-
 # ── Structured result. `ci_passed`, `branch` and `pr_url` are the keys agent-finalize's
 # parse_outcome() actually lifts into the run stats — rename one and it stops reaching the
 # coordinator, silently. The build-specific keys below carry the acceptance story to the reviewer.

@@ -11,6 +11,9 @@
       "ci": [
         "bash scripts/ci.sh"
       ],
+      "pr-gate": [
+        "bash scripts/ci.sh"
+      ],
       "test": [
         "pytest tests/ -q"
       ],
