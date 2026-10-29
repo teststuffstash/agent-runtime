@@ -12,7 +12,7 @@
         "bash scripts/ci.sh"
       ],
       "pr-gate": [
-        "bash scripts/ci.sh"
+        "bash scripts/ci.sh && devbox run scan-secrets"
       ],
       "test": [
         "pytest tests/ -q"
