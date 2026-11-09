@@ -2,78 +2,78 @@
   "lockfile_version": "1",
   "packages": {
     "claude-code@latest": {
-      "last_modified": "2026-11-01T00:57:29Z",
-      "resolved": "github:NixOS/nixpkgs/d357a2b54f0b6dc4aeb4e993190a52cf151b6f24#claude-code",
+      "last_modified": "2026-11-06T15:06:19Z",
+      "resolved": "github:NixOS/nixpkgs/4fe25e12eb9f4c744966dd3de5a05246cf098601#claude-code",
       "source": "devbox-search",
-      "version": "2.1.316",
+      "version": "2.1.318",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/aqk7nfa81s27wiamgwpgc362xdr1hhpl-claude-code-2.1.316",
+              "path": "/nix/store/0n95z7wmzw86lqjbjn8q1y1mhqb7fx8q-claude-code-2.1.318",
               "default": true
             }
           ],
-          "store_path": "/nix/store/aqk7nfa81s27wiamgwpgc362xdr1hhpl-claude-code-2.1.316"
+          "store_path": "/nix/store/0n95z7wmzw86lqjbjn8q1y1mhqb7fx8q-claude-code-2.1.318"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/hg8a2p0vj75bshrkv50v0i47i2z3lsai-claude-code-2.1.316",
+              "path": "/nix/store/9qh4wwzd4r61w1zdfxgz96kqfz9404wn-claude-code-2.1.318",
               "default": true
             }
           ],
-          "store_path": "/nix/store/hg8a2p0vj75bshrkv50v0i47i2z3lsai-claude-code-2.1.316"
+          "store_path": "/nix/store/9qh4wwzd4r61w1zdfxgz96kqfz9404wn-claude-code-2.1.318"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/pw9hhdspm85i5ljy9cb965nz517qk9f7-claude-code-2.1.316",
+              "path": "/nix/store/564f113mxdlar1kywcrf4n4n12z5832b-claude-code-2.1.318",
               "default": true
             }
           ],
-          "store_path": "/nix/store/pw9hhdspm85i5ljy9cb965nz517qk9f7-claude-code-2.1.316"
+          "store_path": "/nix/store/564f113mxdlar1kywcrf4n4n12z5832b-claude-code-2.1.318"
         }
       }
     },
     "codex@latest": {
-      "last_modified": "2026-11-01T00:57:29Z",
-      "resolved": "github:NixOS/nixpkgs/d357a2b54f0b6dc4aeb4e993190a52cf151b6f24#codex",
+      "last_modified": "2026-11-06T15:06:19Z",
+      "resolved": "github:NixOS/nixpkgs/4fe25e12eb9f4c744966dd3de5a05246cf098601#codex",
       "source": "devbox-search",
-      "version": "0.166.0",
+      "version": "0.167.0",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/34vcxifkc5avkwvr5qgqfzvykibpw38k-codex-0.166.0",
+              "path": "/nix/store/k8py8i7ks48bklpls7x3ccvi869p9xad-codex-0.167.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/34vcxifkc5avkwvr5qgqfzvykibpw38k-codex-0.166.0"
+          "store_path": "/nix/store/k8py8i7ks48bklpls7x3ccvi869p9xad-codex-0.167.0"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/a21sr316lspc9fsmdf6c6jbxy33jc33s-codex-0.166.0",
+              "path": "/nix/store/nr2n1b91cyhsf0ai99g968ghjrs4z5n1-codex-0.167.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/a21sr316lspc9fsmdf6c6jbxy33jc33s-codex-0.166.0"
+          "store_path": "/nix/store/nr2n1b91cyhsf0ai99g968ghjrs4z5n1-codex-0.167.0"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/a2qbzx4s1a5b09vlzg1zlhh14x37f1nl-codex-0.166.0",
+              "path": "/nix/store/fk7whs6q869y2qa554b2d0b6w20p4rq8-codex-0.167.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/a2qbzx4s1a5b09vlzg1zlhh14x37f1nl-codex-0.166.0"
+          "store_path": "/nix/store/fk7whs6q869y2qa554b2d0b6w20p4rq8-codex-0.167.0"
         }
       }
     },
@@ -279,8 +279,8 @@
       }
     },
     "github:NixOS/nixpkgs/nixpkgs-unstable": {
-      "last_modified": "2026-11-02T01:28:21Z",
-      "resolved": "github:NixOS/nixpkgs/5c9de89ec55bff981cb8da1a4ee92b10f1438ffc?lastModified=1793582901&narHash=sha256-WDValiY9se78X2Wh7aWWaq%2Fc7HN29U555%2BOKbHEzYrw%3D"
+      "last_modified": "2026-11-06T15:06:19Z",
+      "resolved": "github:NixOS/nixpkgs/4fe25e12eb9f4c744966dd3de5a05246cf098601?lastModified=1793977579&narHash=sha256-WrSODdZFVIs%2FHh2NzC0bY%2BROByi0bATg8WfePX8dPj8%3D"
     },
     "gitleaks@latest": {
       "last_modified": "2026-10-24T03:22:33Z",
@@ -523,40 +523,40 @@
       }
     },
     "opencode@latest": {
-      "last_modified": "2026-11-01T00:57:29Z",
-      "resolved": "github:NixOS/nixpkgs/d357a2b54f0b6dc4aeb4e993190a52cf151b6f24#opencode",
+      "last_modified": "2026-11-06T15:06:19Z",
+      "resolved": "github:NixOS/nixpkgs/4fe25e12eb9f4c744966dd3de5a05246cf098601#opencode",
       "source": "devbox-search",
-      "version": "2.2.1",
+      "version": "2.2.5",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/623hpmg9myqi2rynslma87zgmdf7frdc-opencode-2.2.1",
+              "path": "/nix/store/20n716snynfb18glvcpvjm328xmpyhb7-opencode-2.2.5",
               "default": true
             }
           ],
-          "store_path": "/nix/store/623hpmg9myqi2rynslma87zgmdf7frdc-opencode-2.2.1"
+          "store_path": "/nix/store/20n716snynfb18glvcpvjm328xmpyhb7-opencode-2.2.5"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/q3h5hgcla12k8qvr8dv1pb0cyr8dn1k5-opencode-2.2.1",
+              "path": "/nix/store/f8jrkrhlwygr1ciw42c8w37ql61mbs2f-opencode-2.2.5",
               "default": true
             }
           ],
-          "store_path": "/nix/store/q3h5hgcla12k8qvr8dv1pb0cyr8dn1k5-opencode-2.2.1"
+          "store_path": "/nix/store/f8jrkrhlwygr1ciw42c8w37ql61mbs2f-opencode-2.2.5"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/3qwpy1inmxr0a2qj08p3rs9388rg9l9a-opencode-2.2.1",
+              "path": "/nix/store/s5v1spmji74xdjbiibwkz8dlj88hq4p6-opencode-2.2.5",
               "default": true
             }
           ],
-          "store_path": "/nix/store/3qwpy1inmxr0a2qj08p3rs9388rg9l9a-opencode-2.2.1"
+          "store_path": "/nix/store/s5v1spmji74xdjbiibwkz8dlj88hq4p6-opencode-2.2.5"
         }
       }
     },
