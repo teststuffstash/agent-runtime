@@ -162,6 +162,14 @@ jobs:
           BODY="First-party agent-base image bump (CI-opened, not Renovate). Agent worker pods pick it up on next spawn.
 
           Render-change: the prober's agent-base literal in the AgentStack composition rides this pin (agent-runtime 4a8723f)"
+          # A worker round on this long-lived PR links its issue in the body (`Fixes #N`); that link holds
+          # homelab's phantom-review belt while the PR is open and closes the issue on merge. This job
+          # rewrites the body on every build, so the link lines of the body being replaced are carried
+          # forward — dropping them stranded homelab#3247 open and unlabelled.
+          KEEP=""
+          [ -z "$PR" ] || KEEP="$(gh pr view "$PR" --repo "${{ github.repository_owner }}/homelab" --json body --jq '.body // ""' | tr -d '\r' \
+            | grep -iE '^[[:space:]]*((implements|close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+|issue:[[:space:]]*)#[0-9]+[[:space:]]*$' | sed -E 's/^[[:space:]]+//' | sort -u || true)"
+          [ -z "$KEEP" ] || BODY="$(printf '%s\n\n%s' "$KEEP" "$BODY")"
           [ -n "$PR" ] || PR=$(gh pr create --repo "${{ github.repository_owner }}/homelab" --base master --head deploy/agent-base \
             --title "deploy: agent-base ${TAG}" --body "$BODY" | grep -oE '[0-9]+$')
           gh pr edit "$PR" --repo "${{ github.repository_owner }}/homelab" --title "deploy: agent-base ${TAG}" --body "$BODY" \
