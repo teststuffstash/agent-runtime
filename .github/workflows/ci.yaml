@@ -3,7 +3,7 @@
 # `ci` that gates the merge path (renovate auto-merge + update-pr-branch, FU-014/FU-041) — without a
 # PR-triggered check, an armed PR could never see green and the updater would never bring it current.
 #
-# No push: build-image.yaml owns the ghcr push on master; this is a no-push verification build on the
+# No push: build-image.yaml owns the registry.teststuff.net push on master; this is a no-push verification build on the
 # same ARC tier (homelab-ephemeral), so it exercises the real Dockerfile + devbox/nix toolchain resolve.
 name: CI
 
