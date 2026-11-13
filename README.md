@@ -70,11 +70,13 @@ what cuts a new image. `:latest` tracks `master`.
 
 ```sh
 bash scripts/build-image.sh             # build only (needs docker)
-PUSH=true bash scripts/build-image.sh   # build + push (after `docker login ghcr.io`)
+PUSH=true bash scripts/build-image.sh   # build + push (after `docker login registry.teststuff.net`)
 ```
 
 CI does the same on every `master` push (`.github/workflows/build-image.yaml`, runner
-`homelab-ephemeral`, ghcr via the job `GITHUB_TOKEN`).
+`homelab-ephemeral`), pushing to the homelab registry `registry.teststuff.net` with the
+`REGISTRY_PUSH_TOKEN` repo secret. The image is never published to ghcr: it carries the Claude Code
+binary, which is proprietary, and the homelab registry is reachable from the LAN only.
 
 ## Layout
 
@@ -91,7 +93,7 @@ scripts/build-image.sh        reproducible build, tag-by-lockhash, cosign/SBOM s
 ## Bootstrap (one-time, per homelab `docs/github-setup`)
 
 - Create the GitHub repo `teststuffstash/agent-runtime`, push `master`.
-- First image push: make the ghcr package **public** (or wire a pull secret) — the "required click".
+- The `REGISTRY_PUSH_TOKEN` repo secret: a row in homelab `scripts/github-secrets-sync.sh`.
 - Enable Renovate.
 
 ## Roadmap

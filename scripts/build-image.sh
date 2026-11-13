@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Build + tag the agent-base image, content-addressed by its devbox.lock: the lock pins the exact
 # nixpkgs closure, so the same lock → the same toolchain → a reproducible tag. Mirrors the CI
-# workflow (.github/workflows/build-image.yaml) so `local == CI`. Push to ghcr.
+# workflow (.github/workflows/build-image.yaml) so `local == CI`. Push to the homelab
+# registry (LAN only — never ghcr: the image carries the proprietary Claude Code binary).
 #
 #   bash scripts/build-image.sh             # build only
-#   PUSH=true bash scripts/build-image.sh   # build + push (requires `docker login ghcr.io`)
+#   PUSH=true bash scripts/build-image.sh   # build + push (requires `docker login registry.teststuff.net`)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REGISTRY="${REGISTRY:-ghcr.io/teststuffstash}"
+REGISTRY="${REGISTRY:-registry.teststuff.net}"
 IMAGE="$REGISTRY/agent-base"
 LOCKHASH="$(sha256sum agent-base/devbox.lock | cut -c1-8)"
 TAG="$(date -u +%Y-%m-%d)-${LOCKHASH}"

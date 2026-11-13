@@ -1,11 +1,15 @@
-# Build + push the agent-base harness image to ghcr on every master push. Single responsibility:
+# Build + push the agent-base harness image to the homelab registry on every master push. Single responsibility:
 # this repo produces one artifact family, so there are no path filters or "is this a deploy?" rules
 # — every push to master builds. The tag is content-addressed by agent-base/devbox.lock (same lock →
 # same toolchain → same tag), so a rebuild is reproducible and Renovate's lock bump is the trigger.
 #
-# amd64-only (the agents run in-cluster on x86). Self-hosted ARC runner (homelab-ephemeral); ghcr
-# push auth is the job's GITHUB_TOKEN (packages: write) — no extra secret. Mirrors the sleep-tracking
-# build-image.yaml so the pattern is identical across Tier-A repos.
+# amd64-only (the agents run in-cluster on x86). Self-hosted ARC runner (homelab-ephemeral).
+#
+# PUBLISHED TO registry.teststuff.net ONLY, never ghcr. The image carries the Claude Code binary,
+# which is proprietary: a public ghcr package handed it to anyone. The homelab registry (homelab
+# ADR-121) is reachable from the LAN only — anonymous pull there, push as `releaser` with the
+# REGISTRY_PUSH_TOKEN repo secret (a copy homelab's scripts/github-secrets-sync.sh writes). A
+# missing secret fails the login step, so no image and no pin PR: the cluster stays on its pin.
 name: build-image
 
 on:
@@ -34,7 +38,6 @@ jobs:
     runs-on: homelab-ephemeral
     permissions:
       contents: read
-      packages: write
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
     steps:
@@ -42,16 +45,16 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: registry.teststuff.net
+          username: releaser
+          password: ${{ secrets.REGISTRY_PUSH_TOKEN }}
       # Version = commit-date CalVer + short git sha (2026.<m>.<d>-g<sha>) — consistent with the
       # openrouter-operator / sleep-ingester deploy versioning. Traceable (tag → commit); the path
       # filter above keeps it from churning on changes that don't affect the image.
       - name: Compute version
         id: ver
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/agent-base
+          IMAGE: registry.teststuff.net/agent-base
         run: |
           SHA=$(git rev-parse --short=12 HEAD)
           # BUILD date, not commit date (2026-09-27): a scheduled rebuild of an unchanged commit must
@@ -100,10 +103,10 @@ jobs:
           file: agent-base/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/agent-base:${{ steps.ver.outputs.tag }}
+          tags: registry.teststuff.net/agent-base:${{ steps.ver.outputs.tag }}
       # :latest is a convenience alias, NOT load-bearing: its only consumer is the fallback default
       # in homelab agents/agent-session.sh, which images.env's pin means nothing should ever reach.
-      # It was pushed by the step above until #35, when a transient ghcr secondary-rate-limit 403 on
+      # It was pushed by the step above until #35, when a transient registry 403 (ghcr, then) on
       # the :latest push alone failed the `image` job and therefore SKIPPED deploy-pin — the versioned
       # tag had shipped fine, but no pin PR opened and the fix reached no worker pod. Split out and
       # non-fatal so a tag nothing depends on cannot gate the one everything does. continue-on-error
@@ -113,8 +116,26 @@ jobs:
       - name: "Alias :latest to the versioned tag (non-fatal — #35)"
         continue-on-error: true
         run: |
-          IMG="ghcr.io/${{ github.repository_owner }}/agent-base"
+          IMG="registry.teststuff.net/agent-base"
           docker buildx imagetools create -t "${IMG}:latest" "${IMG}:${{ steps.ver.outputs.tag }}"
+      # Retention (homelab FU-274): a build is ~4 GB and the registry is one 150Gi volume, so every
+      # build untags the ones outside the keep-set — every tag homelab master still mentions, the
+      # newest few, and this one. The rule lives in ONE place, homelab scripts/registry-keep-set.sh
+      # (agent-coordinator runs the same script); the registry's daily garbage-collect reclaims the
+      # bytes. Non-fatal for the same reason as :latest: housekeeping never gates the pin.
+      - name: Fetch homelab master (the keep-set reads its pins)
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: teststuffstash/homelab
+          ref: master
+          path: .homelab-master
+      - name: "Untag builds outside the keep-set (non-fatal)"
+        continue-on-error: true
+        env:
+          REGISTRY_PUSH_TOKEN: ${{ secrets.REGISTRY_PUSH_TOKEN }}
+          KEEP_TAGS: ${{ steps.ver.outputs.tag }}
+        run: bash .homelab-master/scripts/registry-keep-set.sh agent-base --apply
 
   # deploy-pin: bump homelab agents/images.env to the just-built version → agent pods use the pinned
   # image (off :latest) on next spawn. First-party bump (CI-opened, not Renovate). ubuntu-latest for
@@ -144,7 +165,7 @@ jobs:
           TAG: ${{ needs.image.outputs.tag }}
         run: |
           set -euo pipefail
-          VAR=AGENT_BASE_IMAGE; NEWREF="ghcr.io/${{ github.repository_owner }}/agent-base:${TAG}"
+          VAR=AGENT_BASE_IMAGE; IMG="registry.teststuff.net/agent-base"; NEWREF="${IMG}:${TAG}"
           git clone --quiet --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository_owner }}/homelab.git" h && cd h
           cur=$(grep -m1 "^${VAR}=" agents/images.env | cut -d= -f2-)
           [ "$cur" = "$NEWREF" ] && { echo "images.env already ${VAR}=${NEWREF}"; exit 0; }
@@ -153,7 +174,9 @@ jobs:
           sed -i -E "s#^(${VAR}=).*#\1${NEWREF}#" agents/images.env
           # The prober's agent-base literal in the AgentStack composition rides the same pin (it cannot
           # source images.env; homelab FU-270 fork C, #2905) — one bump, both consumers.
-          sed -i -E "s#(ghcr\.io/${{ github.repository_owner }}/agent-base:)[^[:space:]\"']+#\1${TAG}#" argocd/resources/agentstack/composition.yaml
+          grep -qF "${IMG}:" argocd/resources/agentstack/composition.yaml \
+            || { echo "::error::no ${IMG}:<tag> literal in the AgentStack composition — the prober's pin moved; refusing a half-bumped PR"; exit 1; }
+          sed -i -E "s#(${IMG}:)[^[:space:]\"']+#\1${TAG}#" argocd/resources/agentstack/composition.yaml
           git commit -q -am "deploy: agent-base ${TAG}"
           git push -q -f origin deploy/agent-base
           PR=$(gh pr list --repo "${{ github.repository_owner }}/homelab" --head deploy/agent-base --state open --json number --jq '.[0].number // empty')
