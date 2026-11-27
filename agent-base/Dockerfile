@@ -24,11 +24,14 @@ RUN mkdir -p /opt/agent /work && chown -R devbox:devbox /opt/agent /work
 
 # Materialize the harness layer from the committed lock → deterministic goose/opencode versions.
 # This layer is TWO things, not just a cache-warm: (1) the PLATFORM interpreter/toolchain that the
-# base scripts run on — `agent-finalize` runs on THIS `python@3.11`, `agent-git-token`/`gh` on THIS
+# base scripts run on — `agent-finalize` runs on THIS python 3.15, `agent-git-token`/`gh` on THIS
 # gh, etc. — outside any project `devbox run`, so it's decoupled from whatever a stack pins; and
 # (2) a warm /nix store, so a project's runtime `devbox install` is cache-hits for the shared
 # closure (a project pinning a DIFFERENT python just fetches that delta; it never changes what the
 # base scripts use). Bump python here = a platform decision; a stack's python lives in ITS devbox.json.
+# python rides a commit-pinned nixpkgs flake ref (`…#python315`) because devbox's search index still
+# resolves python@3.15 to 3.15.0rc2 (homelab#2610); swap back to `python@3.15` once
+# `devbox search python@3.15` resolves a final. The weekly devbox-update never moves it (@latest only).
 WORKDIR /opt/agent
 COPY --chown=devbox:devbox agent-base/devbox.json agent-base/devbox.lock ./
 USER devbox

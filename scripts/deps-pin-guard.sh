@@ -21,7 +21,11 @@
 #     with the Dockerfile un-owned it is a worker adapting a base-image bump, and refusing it
 #     would park every such PR on the human the narrowing removed.
 # Pin material per file:
-#   devbox.json     version-string lines (package@version, "version": fields);
+#   devbox.json     version-string lines (package@version, "version": fields) and a nixpkgs flake
+#                   ref pinned to a full commit (`"github:NixOS/nixpkgs/<40-hex>#<attr>"`) — the
+#                   form a package takes while devbox's search index lags nixpkgs (python 3.15
+#                   final, homelab#2610); a commit-pinned ref is exactly as pinned as a lock entry.
+#                   A branch ref (`nixpkgs-unstable`) or any other owner/repo is NOT pin material;
 #   devbox.lock     machine-generated hash material — nix verifies it against the substituter
 #                   signatures, so it is admitted as a whole.
 #
@@ -135,10 +139,12 @@ for g in $touched; do
     *devbox.json)
       content_at "$BASE_SHA" "$g" "$tmp/base"
       content_at "$HEAD_SHA" "$g" "$tmp/head"
-      # delta must be version-material only: package@version strings or "version": fields.
+      # delta must be version-material only: package@version strings, a commit-pinned nixpkgs flake
+      # ref, or "version": fields.
       patch=$(git diff --no-index -- "$tmp/base" "$tmp/head" || true)
       nonpin=$(printf '%s\n' "$patch" | grep -E '^[-+][^-+]' \
                  | grep -Ev '^[-+]\s*"[A-Za-z0-9@/._-]+@[A-Za-z0-9._-]+",?\s*$' \
+                 | grep -Ev '^[-+]\s*"github:NixOS/nixpkgs/[0-9a-f]{40}#[A-Za-z0-9._-]+",?\s*$' \
                  | grep -Ev '^[-+]\s*"version"\s*:' || true)
       if [ -n "$nonpin" ]; then
         echo "deps-pin-guard: FAIL — $g delta carries non-version lines:" >&2
