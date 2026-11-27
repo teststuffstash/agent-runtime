@@ -6,7 +6,7 @@ file, and runs the REAL script in its `--local <base> <head>` mode, so the files
 test and the exit/message contract are exercised end to end. Expected verdicts come from the
 contract in the script's header comment, not from running the code: a guarded file changes only
 under a human code-owner review (the PR also touches a path the LAST matching CODEOWNERS rule
-gives an owner) or with a pin-only shape (devbox.json: package@version / "version" lines; the lock
+gives an owner) or with a pin-only shape (devbox.json: package@version / commit-pinned nixpkgs flake ref / "version" lines; the lock
 as a whole); a guarded file + any path left un-owned is refused, exit 1, `deps-pin-guard: FAIL`.
 """
 
@@ -130,6 +130,37 @@ def test_non_version_devbox_edit_is_refused(tmp_path: pathlib.Path) -> None:
     r = _verdict(tmp_path, {"agent-base/devbox.json": head})
     assert r.returncode == 1
     assert "non-version lines" in r.stderr
+
+
+_SHA_A = "a" * 40
+_SHA_B = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_commit_pinned_nixpkgs_flake_ref_is_admitted(tmp_path: pathlib.Path) -> None:
+    # Contract (script header, "Pin material"): a nixpkgs flake ref pinned to a full 40-hex commit
+    # is pin material, both as the replacement of a package@version line and as a rev bump.
+    swap = DEVBOX.replace('"python@3.13"', f'"github:NixOS/nixpkgs/{_SHA_A}#python315"')
+    r = _verdict(tmp_path, {"agent-base/devbox.json": swap})
+    assert r.returncode == 0, r.stderr
+    assert "pure dep-pin diff" in r.stdout
+    bump = swap.replace(_SHA_A, _SHA_B)
+    r = _verdict(tmp_path / "bump", {"agent-base/devbox.json": bump},
+                 base_overrides={"agent-base/devbox.json": swap})
+    assert r.returncode == 0, r.stderr
+
+
+def test_unpinned_or_foreign_flake_ref_is_refused(tmp_path: pathlib.Path) -> None:
+    # A branch ref moves under the lock's feet, and another owner/repo is not nixpkgs — neither is
+    # pin material (script header), so both are refused as non-version lines.
+    for i, ref in enumerate([
+        "github:NixOS/nixpkgs/nixpkgs-unstable#python315",
+        f"github:someone/nixpkgs/{_SHA_A}#python315",
+        f"github:NixOS/nixpkgs/{_SHA_A[:12]}#python315",
+    ]):
+        head = DEVBOX.replace('"python@3.13"', f'"{ref}"')
+        r = _verdict(tmp_path / str(i), {"agent-base/devbox.json": head})
+        assert r.returncode == 1, ref
+        assert "non-version lines" in r.stderr, ref
 
 
 # ── the fileset rule (openrouter-operator#83) ───────────────────────────────────────────────────

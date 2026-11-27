@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
   "packages": [
-    "python313Packages.pytest@latest",
+    "github:NixOS/nixpkgs/619c39f6eac5d1ed6b8f073a9414baf7034b2356#python315Packages.pytest",
     "gh@latest",
     "gitleaks@latest"
   ],
